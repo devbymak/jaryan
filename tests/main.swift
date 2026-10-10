@@ -63,7 +63,12 @@ check(MenuBar.items(rate: rate, usage: 5_000_000_000, style: .combined, unit: .b
       == [MenuBarItem(symbol: "⇅", value: "2.03 MB"), MenuBarItem(symbol: "=", value: "5.00 GB")], "Combined with usage")
 check(MenuBar.items(rate: rate, usage: nil, style: .downloadFirst, unit: .bytes, perSecond: true).map(\.value)
       == ["2.00 MB/s", "30.0 KB/s"], "Stacked layout keeps /s")
-check(MenuBar.usageFits(style: .combined, stacked: true) && !MenuBar.usageFits(style: .uploadFirst, stacked: true)
-      && MenuBar.usageFits(style: .uploadFirst, stacked: false), "Stacked layout has two lines")
+let separate = MenuBar.items(rate: rate, usage: 1, style: .uploadFirst, unit: .bytes)
+check(MenuBar.columns(separate, stacked: true).map { $0.map(\.symbol) } == [["↑", "↓"], ["="]], "Stacked usage gets its own column")
+check(MenuBar.columns(separate, stacked: false).map(\.count) == [1, 1, 1], "Side by side: one entry per column")
+let combined = MenuBar.items(rate: rate, usage: 1, style: .combined, unit: .bytes)
+check(MenuBar.columns(combined, stacked: true).map { $0.map(\.symbol) } == [["⇅", "="]], "Combined and usage stack together")
+check(MenuBar.columns(MenuBar.items(rate: rate, usage: nil, style: .combined, unit: .bytes), stacked: true).map(\.count) == [1],
+      "A lone combined speed is one line")
 
 print("All \(checks) checks passed")

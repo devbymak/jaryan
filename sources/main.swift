@@ -108,9 +108,8 @@ final class TrafficModel: ObservableObject {
                                 sent: UInt64(max(0, defaults.double(forKey: "usageSent"))))
         usage = stored.day == today ? stored : DailyUsage(day: today)
     }
-    var showsUsageInMenuBar: Bool { showsUsage && MenuBar.usageFits(style: style, stacked: stacked) }
     var menuBarItems: [MenuBarItem] {
-        MenuBar.items(rate: rate, usage: showsUsageInMenuBar ? usage.total : nil, style: style, unit: unit, perSecond: showsPerSecond)
+        MenuBar.items(rate: rate, usage: showsUsage ? usage.total : nil, style: style, unit: unit, perSecond: showsPerSecond)
     }
     var interfaceTitle: String {
         interface.isEmpty ? "All interfaces" : "\(title(for: interface)) (\(interface))"
@@ -366,7 +365,6 @@ struct SettingsView: View {
                 }
                 Toggle("Show “/s” after speeds", isOn: $model.showsPerSecond)
                 Toggle("Show today's data usage", isOn: $model.showsUsage)
-                    .disabled(!MenuBar.usageFits(style: model.style, stacked: model.stacked))
                 Picker("Units", selection: $model.unit) {
                     Text("Bytes (MB/s)").tag(SpeedUnit.bytes)
                     Text("Bits (Mb/s)").tag(SpeedUnit.bits)
@@ -374,9 +372,7 @@ struct SettingsView: View {
             } header: {
                 Text("Menu Bar")
             } footer: {
-                Text(MenuBar.usageFits(style: model.style, stacked: model.stacked)
-                     ? "Usage appears after “=”. 1 KB = 1000 bytes, as in Finder."
-                     : "Two stacked speeds leave no room for usage. Choose Combined or Side by side to show it.")
+                Text("Usage appears after “=”. 1 KB = 1000 bytes, as in Finder.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Section {
@@ -443,20 +439,22 @@ struct MenuBarRenderer {
         let columns = columns
         let gap: CGFloat = stacked ? 6 : 3, spacing: CGFloat = 7
         let column = columns.symbol + gap + columns.value
-        let count = stacked ? 1 : items.count  // One column of stacked lines, or columns side by side.
+        let groups = MenuBar.columns(items, stacked: stacked)
         let font = font
         let lineHeight = ceil(font.ascender - font.descender)
-        let size = NSSize(width: CGFloat(count) * column + CGFloat(count - 1) * spacing, height: height)
-        let stacked = stacked
+        let size = NSSize(width: CGFloat(groups.count) * column + CGFloat(max(groups.count - 1, 0)) * spacing, height: height)
         let image = NSImage(size: size, flipped: true) { _ in
-            for (index, entry) in items.enumerated() {
-                let x = stacked ? 0 : CGFloat(index) * (column + spacing)
-                let y = stacked ? (height - 2 * lineHeight) / 2 + CGFloat(index) * lineHeight : (height - lineHeight) / 2
-                let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
-                let symbol = NSAttributedString(string: entry.symbol, attributes: attributes)
-                symbol.draw(at: CGPoint(x: x + (columns.symbol - symbol.size().width) / 2, y: y))
-                let value = NSAttributedString(string: entry.value, attributes: attributes)
-                value.draw(at: CGPoint(x: x + column - value.size().width, y: y))  // Right-aligned so digits stay put.
+            for (index, group) in groups.enumerated() {
+                for (line, entry) in group.enumerated() {
+                    let x = CGFloat(index) * (column + spacing)
+                    // A column with one line is centred vertically.
+                    let y = (height - CGFloat(group.count) * lineHeight) / 2 + CGFloat(line) * lineHeight
+                    let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
+                    let symbol = NSAttributedString(string: entry.symbol, attributes: attributes)
+                    symbol.draw(at: CGPoint(x: x + (columns.symbol - symbol.size().width) / 2, y: y))
+                    let value = NSAttributedString(string: entry.value, attributes: attributes)
+                    value.draw(at: CGPoint(x: x + column - value.size().width, y: y))  // Right-aligned so digits stay put.
+                }
             }
             return true
         }

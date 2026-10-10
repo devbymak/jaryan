@@ -136,6 +136,10 @@ enum MenuBar {
         if let usage { items.append(MenuBarItem(symbol: "=", value: Format.amount(usage))) }
         return items
     }
-    /// Two stacked lines fit two entries, so separate speeds leave no room for usage.
-    static func usageFits(style: MenuBarStyle, stacked: Bool) -> Bool { !stacked || style == .combined }
+    /// Groups entries into menu bar columns: up to two lines each when stacked, one each side by side.
+    /// Stacked speeds with usage become two columns: both speeds, then usage on its own.
+    static func columns(_ items: [MenuBarItem], stacked: Bool) -> [[MenuBarItem]] {
+        guard stacked else { return items.map { [$0] } }
+        return stride(from: 0, to: items.count, by: 2).map { Array(items[$0..<min($0 + 2, items.count)]) }
+    }
 }
