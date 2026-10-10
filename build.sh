@@ -52,9 +52,16 @@ timestamp=()
 codesign --force --sign "$identity" "${timestamp[@]}" --options runtime --entitlements .build/jarian.entitlements 'Jarian.app'
 echo 'Built Jarian.app'
 if [[ "${1:-}" == "--install" ]]; then
-  # Quit the running copy first; it saves today's usage before exiting.
-  osascript -e 'if application id "local.jarian" is running then tell application id "local.jarian" to quit' >/dev/null
-  for _ in {1..50}; do pgrep -qf '/Applications/Jarian.app/Contents/MacOS/jarian$' || break; sleep 0.2; done
+  # Replace only an earlier Jarian, never another app with the same name.
+  if [[ -e '/Applications/Jarian.app' && "$(plutil -extract CFBundleIdentifier raw -o - '/Applications/Jarian.app/Contents/Info.plist' 2>/dev/null || true)" != local.jarian ]]; then
+    echo '/Applications/Jarian.app is not Jarian; leaving it in place.' >&2; exit 1
+  fi
+  # Quit every running copy first, wherever it was started; it saves today's usage before exiting. Matched by bundle ID,
+  # like the app's own one-copy check, so a copy still running would also make the new one quit at launch.
+  running() { [[ -n "$(lsappinfo find bundleid=local.jarian)" ]] }
+  if running; then osascript -e 'tell application id "local.jarian" to quit' >/dev/null; fi
+  for _ in {1..50}; do running || break; sleep 0.2; done
+  if running; then echo 'Jarian is still running; quit it, then run ./build.sh --install again.' >&2; exit 1; fi
   rm -rf '/Applications/Jarian.app'
   ditto 'Jarian.app' '/Applications/Jarian.app'
   # Only the installed copy should handle Launch at Login.
