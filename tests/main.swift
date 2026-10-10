@@ -128,10 +128,6 @@ check(meta?.place(locale: english) == "Tbilisi, Georgia" && trace?.place(locale:
 check(meta?.flag == "🇬🇪" && NetworkLocation(ip: "", country: "XX", colo: "").flag == nil
       && NetworkLocation(ip: "", country: "T1", colo: "").flag == nil, "Flags only for real regions")
 if let meta {
-    check(meta.updated(by: NetworkLocation(ip: meta.ip, country: "GE", colo: "SOF")) == meta, "Same address keeps details")
-    check(meta.updated(by: NetworkLocation(ip: meta.ip, country: "GE", colo: "IST")).city == "Tbilisi"
-          && meta.updated(by: NetworkLocation(ip: meta.ip, country: "GE", colo: "IST")).coloCity == nil, "A new data center drops its old city")
-    check(meta.updated(by: NetworkLocation(ip: "5.6.7.8", country: "NL", colo: "AMS")).city == nil, "A new address starts over")
     let located = PingReading(latency: 0.291, location: meta)
     check(MenuBar.pingColumns(located, stacked: true) == [["🇬🇪 GE", "291 ms"]], "Stacked: flag and country over the ping")
     check(MenuBar.pingColumns(located, stacked: false) == [["🇬🇪 GE"], ["291 ms"]], "Side by side: location, then ping")
@@ -139,6 +135,54 @@ if let meta {
 check(MenuBar.pingColumns(PingReading(failed: true), stacked: true) == [["timeout"]], "Only the ping until the location is known")
 check(MenuBar.pingColumns(PingReading(latency: 0.05, location: NetworkLocation(ip: "1.2.3.4", country: "T1", colo: "")), stacked: true)
       == [["T1", "50 ms"]], "A code without a flag is shown alone")
+
+// Location services, from real responses
+func located(_ service: LocationService, _ json: String) -> NetworkLocation? { service.location(from: Data(json.utf8)) }
+check(located(.ipinfo, #"{"ip":"104.28.200.67","city":"Tbilisi","country":"GE","org":"AS13335 Cloudflare, Inc."}"#)
+      == NetworkLocation(ip: "104.28.200.67", country: "GE", city: "Tbilisi", organization: "Cloudflare, Inc.", colo: ""), "ipinfo.io")
+check(located(.geojs, #"{"city":"Tbilisi","country":"Georgia","country_code":"GE","ip":"104.28.200.67","organization":"AS13335 Cloudflare, Inc.","organization_name":"Cloudflare, Inc."}"#)
+      == NetworkLocation(ip: "104.28.200.67", country: "GE", city: "Tbilisi", organization: "Cloudflare, Inc.", colo: ""), "GeoJS")
+check(located(.ipsb, #"{"organization":"Cloudflare Warp","isp":"Cloudflare Warp","city":"Tbilisi","ip":"104.28.200.67","country":"Georgia","country_code":"GE"}"#)
+      == NetworkLocation(ip: "104.28.200.67", country: "GE", city: "Tbilisi", organization: "Cloudflare Warp", colo: ""), "IP.SB")
+check(located(.ifconfig, #"{"ip":"104.28.200.67","country":"Georgia","country_iso":"GE","city":"Tbilisi","asn":"AS13335","asn_org":"CLOUDFLARENET"}"#)
+      == NetworkLocation(ip: "104.28.200.67", country: "GE", city: "Tbilisi", organization: "CLOUDFLARENET", colo: ""), "ifconfig.co")
+check(located(.cloudflare, "ip=1.2.3.4\nloc=DE\ncolo=FRA\n") == NetworkLocation(ip: "1.2.3.4", country: "DE", colo: "FRA"),
+      "Cloudflare falls back to the trace")
+check(located(.ipinfo, #"{"error":"rate limited"}"#) == nil && located(.geojs, "<html>") == nil && located(.off, "{}") == nil,
+      "Errors and pages are not locations")
+check(LocationService.withoutASN("AS13335 Cloudflare, Inc.") == "Cloudflare, Inc." && LocationService.withoutASN("ASUS Net") == "ASUS Net",
+      "Only a real AS number is dropped")
+check(LocationService.off.requests.isEmpty && LocationService.cloudflare.requests.count == 2
+      && LocationService.allCases.allSatisfy { $0.requests.allSatisfy { $0.url?.scheme == "https" } }, "Lookups use HTTPS only")
+check(PingServer.allCases.allSatisfy { $0.url.scheme == "https" } && PingServer.cloudflare.reportsAddress && !PingServer.google.reportsAddress,
+      "Ping servers")
+
+// Combining traced and looked-up locations
+let v4 = NetworkLocation(ip: "104.28.200.67", country: "GE", colo: "SOF")
+let details = NetworkLocation(ip: "2a09:bac5::1", country: "GE", city: "Tbilisi", organization: "Cloudflare, Inc.", colo: "")
+var state = LocationState()
+check(state.needsLookup(at: 0, interval: 60) && state.location == nil, "Look up at first")
+var forIP = state.lookingUp(at: 0)
+check(!state.needsLookup(at: 30, interval: 60) && state.needsLookup(at: 60, interval: 60), "Without a trace, look up every minute")
+state.found(details, for: forIP)
+check(state.location == details, "Untraced details are shown as found")
+state = LocationState(); state.trace(v4)
+check(state.location == v4 && state.needsLookup(at: 0, interval: 60), "A trace is shown until details arrive")
+forIP = state.lookingUp(at: 0)
+check(!state.needsLookup(at: 600, interval: 60), "With a trace, once per address however long it runs")
+state.found(details, for: forIP)
+check(state.location?.city == "Tbilisi" && state.location?.colo == "SOF", "Details looked up from IPv6 still match the IPv4 trace")
+state.trace(NetworkLocation(ip: "104.28.200.67", country: "GE", colo: "IST"))
+check(state.location?.colo == "IST" && state.location?.city == "Tbilisi", "Same address, new data center: details stay")
+state.trace(NetworkLocation(ip: "5.6.7.8", country: "NL", colo: "AMS"))
+check(state.location?.city == nil && state.location?.country == "NL" && state.needsLookup(at: 0, interval: 60),
+      "A new address hides old details and looks up again")
+let stale = state.lookingUp(at: 1)
+state.trace(NetworkLocation(ip: "9.9.9.9", country: "US", colo: "SJC"))
+state.found(details, for: stale)
+check(state.location?.city == nil, "A lookup for an older address is dropped")
+state.refresh()
+check(state.needsLookup(at: 2, interval: 60), "Refresh looks again")
 
 // Ping history
 var pings = PingHistory()

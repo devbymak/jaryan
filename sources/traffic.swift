@@ -209,13 +209,6 @@ struct NetworkLocation: Equatable {
         let name = locale.localizedString(forRegionCode: country) ?? country
         return [city, name].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
     }
-    /// A newer trace for the same address keeps the looked-up details; a new address replaces them.
-    func updated(by trace: NetworkLocation) -> NetworkLocation {
-        guard trace.ip == ip else { return trace }
-        var next = self
-        if trace.colo != colo { next.colo = trace.colo; next.coloCity = nil }
-        return next
-    }
 }
 
 enum Cloudflare {
@@ -242,7 +235,126 @@ enum Cloudflare {
     }
 }
 
-/// The latest ping to Cloudflare and where the connection exits.
+/// Where pings go. Each answers a tiny HTTPS request without needing an account.
+enum PingServer: String, CaseIterable, Identifiable {
+    case cloudflare, google, apple
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .cloudflare: "Cloudflare"
+        case .google: "Google"
+        case .apple: "Apple"
+        }
+    }
+    /// Cloudflare's reply also reports the address, country, and data center, so a new exit address shows at once.
+    var url: URL {
+        switch self {
+        case .cloudflare: URL(string: "https://speed.cloudflare.com/cdn-cgi/trace")!
+        case .google: URL(string: "https://www.gstatic.com/generate_204")!
+        case .apple: URL(string: "https://captive.apple.com/hotspot-detect.html")!
+        }
+    }
+    var reportsAddress: Bool { self == .cloudflare }
+}
+
+/// Free services that look up where an address is, without an account.
+enum LocationService: String, CaseIterable, Identifiable {
+    case cloudflare, ipinfo, geojs, ipsb, ifconfig, off
+    var id: String { rawValue }
+    /// Seconds between lookups when the ping server does not report the address; also bounded by free-use limits.
+    static let interval: TimeInterval = 60
+    var title: String {
+        switch self {
+        case .cloudflare: "Cloudflare"
+        case .ipinfo: "ipinfo.io"
+        case .geojs: "GeoJS"
+        case .ipsb: "IP.SB"
+        case .ifconfig: "ifconfig.co"
+        case .off: "Off"
+        }
+    }
+    /// Tried in order until one answers.
+    var requests: [URLRequest] {
+        switch self {
+        case .cloudflare:
+            var meta = URLRequest(url: URL(string: "https://speed.cloudflare.com/meta")!)
+            // The endpoint answers only requests that come from Cloudflare's speed test page. The trace is the fallback.
+            meta.setValue("https://speed.cloudflare.com/", forHTTPHeaderField: "Referer")
+            return [meta, URLRequest(url: PingServer.cloudflare.url)]
+        case .ipinfo: return [URLRequest(url: URL(string: "https://ipinfo.io/json")!)]
+        case .geojs: return [URLRequest(url: URL(string: "https://get.geojs.io/v1/ip/geo.json")!)]
+        case .ipsb: return [URLRequest(url: URL(string: "https://api.ip.sb/geoip")!)]
+        case .ifconfig: return [URLRequest(url: URL(string: "https://ifconfig.co/json")!)]
+        case .off: return []
+        }
+    }
+    var host: String? { requests.first?.url?.host }
+    func location(from data: Data) -> NetworkLocation? {
+        if self == .cloudflare { return Cloudflare.meta(data) ?? Cloudflare.trace(String(decoding: data, as: UTF8.self)) }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        func text(_ key: String) -> String? {
+            (json[key] as? String).flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+        }
+        let country: String, operators: [String]
+        switch self {
+        case .ipinfo: (country, operators) = ("country", ["org"])
+        case .geojs: (country, operators) = ("country_code", ["organization_name", "organization"])
+        case .ipsb: (country, operators) = ("country_code", ["organization", "isp", "asn_organization"])
+        case .ifconfig: (country, operators) = ("country_iso", ["asn_org"])
+        case .cloudflare, .off: return nil
+        }
+        guard let ip = text("ip") else { return nil }
+        return NetworkLocation(ip: ip, country: text(country) ?? "", city: text("city"),
+                               organization: operators.lazy.compactMap(text).first.map(Self.withoutASN), colo: "")
+    }
+    /// "AS13335 Cloudflare, Inc." → "Cloudflare, Inc."
+    static func withoutASN(_ name: String) -> String {
+        guard name.hasPrefix("AS"), let space = name.firstIndex(of: " "),
+              name[name.index(name.startIndex, offsetBy: 2)..<space].allSatisfy(\.isNumber) else { return name }
+        return String(name[name.index(after: space)...])
+    }
+}
+
+/// What the ping server reports about the connection, combined with what the location service looked up.
+struct LocationState: Equatable {
+    /// From each ping reply, when the ping server reports the address, as Cloudflare does.
+    private(set) var traced: NetworkLocation?
+    private(set) var details: NetworkLocation?
+    /// The traced address the details were looked up for. A service may see IPv6 where Cloudflare saw IPv4, so the
+    /// details' own address is not compared.
+    private var detailsFor: String?
+    private var requestedFor: String?
+    private var requestedAt: TimeInterval?
+    mutating func trace(_ location: NetworkLocation) { traced = location }
+    /// With a traced address, once per address; without, every `interval` seconds.
+    func needsLookup(at now: TimeInterval, interval: TimeInterval) -> Bool {
+        guard let requestedAt else { return true }
+        if let traced { return requestedFor != traced.ip }
+        return now - requestedAt >= interval
+    }
+    /// Returns the traced address the lookup is for, to hand back to `found`.
+    mutating func lookingUp(at now: TimeInterval) -> String? {
+        requestedAt = now; requestedFor = traced?.ip
+        return requestedFor
+    }
+    /// Ignored if the traced address changed while the lookup ran.
+    mutating func found(_ location: NetworkLocation, for traced: String?) {
+        guard traced == self.traced?.ip else { return }
+        details = location; detailsFor = traced
+    }
+    /// Look again at the next chance, as after the network changes. What is shown stays until then.
+    mutating func refresh() { requestedAt = nil; requestedFor = nil }
+    var location: NetworkLocation? {
+        guard let details else { return traced }
+        guard let traced else { return details }
+        guard detailsFor == traced.ip else { return traced }
+        var merged = details
+        if merged.colo != traced.colo { merged.colo = traced.colo; merged.coloCity = nil }
+        return merged
+    }
+}
+
+/// The latest ping and where the connection exits.
 struct PingReading: Equatable {
     enum Quality { case good, fair, poor }
     /// Seconds for the last round trip, or nil if it failed or none has finished yet.

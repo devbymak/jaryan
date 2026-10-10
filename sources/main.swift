@@ -52,22 +52,22 @@ func interfaceDisplayNames() -> [String: String] {
 /// Seconds on a clock that keeps counting during sleep and ignores wall-clock changes.
 func monotonicSeconds() -> TimeInterval { Double(clock_gettime_nsec_np(CLOCK_MONOTONIC)) / 1e9 }
 
-/// Times a tiny HTTPS request to Cloudflare. It takes the same route as other traffic, through any VPN or proxy, so it
-/// measures the delay websites actually see, like Happ's "real delay". Nothing is sent while it is stopped.
+/// Times a tiny HTTPS request to the chosen server. It takes the same route as other traffic, through any VPN or proxy,
+/// so it measures the delay websites actually see, like Happ's "real delay". Nothing is sent while it is stopped.
 final class Pinger {
     static let interval: TimeInterval = 5
-    private static let trace = URL(string: "https://speed.cloudflare.com/cdn-cgi/trace")!
-    private static let meta = URL(string: "https://speed.cloudflare.com/meta")!
     var onChange: ((PingReading) -> Void)?
     private(set) var reading = PingReading() { didSet { if reading != oldValue { onChange?(reading) } } }
+    private(set) var server: PingServer
+    private(set) var service: LocationService
+    private var places = LocationState()
     private var session: URLSession?
     private var timer: Timer?
     private var monitor: NWPathMonitor?
     private var inFlight = false
     /// Bumped whenever the session is replaced, so replies to cancelled requests are ignored.
     private var generation = 0
-    /// Address whose city and operator were last looked up.
-    private var detailsIP: String?
+    init(server: PingServer = .cloudflare, service: LocationService = .cloudflare) { self.server = server; self.service = service }
 
     /// Records only the request-to-first-byte time, without DNS, TCP, and TLS setup: one network round trip.
     private final class Timing: NSObject, URLSessionTaskDelegate {
@@ -95,17 +95,27 @@ final class Pinger {
         timer?.invalidate(); timer = nil
         monitor?.cancel(); monitor = nil
         resetSession(); session = nil
+        places = LocationState()
         reading = PingReading()
+    }
+    /// Keeps the ping graph, but forgets the location and pings again at once.
+    func use(_ server: PingServer, _ service: LocationService) {
+        guard server != self.server || service != self.service else { return }
+        self.server = server; self.service = service
+        places = LocationState()
+        reading.location = nil
+        if timer != nil { networkChanged() }
     }
     /// Old connections may still use the previous route, so start fresh and look again at once.
     private func networkChanged() {
         resetSession()
+        places.refresh()
         session = Self.makeSession()
         ping()
     }
     private func resetSession() {
         session?.invalidateAndCancel()
-        generation += 1; inFlight = false; detailsIP = nil
+        generation += 1; inFlight = false
     }
     private static func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
@@ -117,42 +127,54 @@ final class Pinger {
         configuration.httpShouldSetCookies = false
         return URLSession(configuration: configuration, delegate: nil, delegateQueue: .main)
     }
+    // Requests are created at once, on the main queue, where the session is replaced. A request created later could find
+    // its session already invalidated, which raises an exception.
     private func ping() {
         guard let session, !inFlight else { return }
         inFlight = true
-        let generation = generation
-        Task { @MainActor [weak self] in
-            let timing = Timing()
-            let started = monotonicSeconds()
-            let reply = try? await session.data(from: Self.trace, delegate: timing)
+        let generation = generation, server = server, timing = Timing(), started = monotonicSeconds()
+        let task = session.dataTask(with: server.url) { [weak self] data, response, _ in
             guard let self, generation == self.generation else { return }
             self.inFlight = false
             var next = self.reading
-            guard let (data, response) = reply, (response as? HTTPURLResponse)?.statusCode == 200 else {
+            guard let data, let status = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(status) else {
                 next.latency = nil; next.failed = true
                 next.history.record(PingSample(time: monotonicSeconds(), latency: nil))
                 self.reading = next
                 return
             }
+            // A reply after a lost ping may come from a reconnected VPN with a new exit.
+            if next.failed { self.places.refresh() }
             next.latency = timing.roundTrip ?? monotonicSeconds() - started; next.failed = false
             next.history.record(PingSample(time: monotonicSeconds(), latency: next.latency))
-            if let found = Cloudflare.trace(String(decoding: data, as: UTF8.self)) {
-                next.location = next.location?.updated(by: found) ?? found
+            if self.service != .off {
+                if server.reportsAddress, let found = Cloudflare.trace(String(decoding: data, as: UTF8.self)) { self.places.trace(found) }
+                next.location = self.places.location
             }
             self.reading = next
-            if let ip = next.location?.ip, ip != self.detailsIP { self.detailsIP = ip; self.lookUpDetails(session, generation: generation) }
+            if self.service != .off, self.places.needsLookup(at: monotonicSeconds(), interval: LocationService.interval) {
+                self.lookUp(session, generation: generation)
+            }
         }
+        task.delegate = timing
+        task.resume()
     }
-    /// Adds the city and network operator, once per exit address. Best effort: the trace alone gives the country.
-    private func lookUpDetails(_ session: URLSession, generation: Int) {
-        var request = URLRequest(url: Self.meta)
-        // The endpoint answers only requests that come from Cloudflare's speed test page.
-        request.setValue("https://speed.cloudflare.com/", forHTTPHeaderField: "Referer")
-        Task { @MainActor [weak self] in
-            guard let (data, _) = try? await session.data(for: request), let found = Cloudflare.meta(data),
-                  let self, generation == self.generation, self.reading.location?.ip == found.ip else { return }
-            self.reading.location = found
+    /// Adds the city and network operator. Best effort: with Cloudflare pings, the trace alone gives the country.
+    private func lookUp(_ session: URLSession, generation: Int) {
+        let service = service
+        let traced = places.lookingUp(at: monotonicSeconds())
+        func attempt(_ requests: ArraySlice<URLRequest>) {
+            guard let request = requests.first else { return }
+            session.dataTask(with: request) { [weak self] data, response, _ in
+                guard let self, generation == self.generation, service == self.service else { return }
+                guard let data, (response as? HTTPURLResponse)?.statusCode == 200, let found = service.location(from: data) else {
+                    return attempt(requests.dropFirst())
+                }
+                self.places.found(found, for: traced)
+                self.reading.location = self.places.location
+            }.resume()
         }
+        attempt(service.requests[...])
     }
 }
 
@@ -200,6 +222,12 @@ final class TrafficModel: ObservableObject {
     @Published var showsPing = UserDefaults.standard.object(forKey: "showsPing") as? Bool ?? true {
         didSet { defaults.set(showsPing, forKey: "showsPing"); onLayoutChange?() }
     }
+    @Published var pingServer = PingServer(rawValue: UserDefaults.standard.string(forKey: "pingServer") ?? "") ?? .cloudflare {
+        didSet { defaults.set(pingServer.rawValue, forKey: "pingServer"); pinger.use(pingServer, locationService) }
+    }
+    @Published var locationService = LocationService(rawValue: UserDefaults.standard.string(forKey: "locationService") ?? "") ?? .cloudflare {
+        didSet { defaults.set(locationService.rawValue, forKey: "locationService"); pinger.use(pingServer, locationService) }
+    }
     @Published private(set) var ping = PingReading()
     /// BSD name of the interface whose speed is shown, or "" for all physical interfaces.
     @Published var interface = UserDefaults.standard.string(forKey: "interface") ?? "" {
@@ -223,7 +251,7 @@ final class TrafficModel: ObservableObject {
     private var sampler = TrafficSampler()
     private var names = interfaceDisplayNames()
     private var refreshes = 0
-    private let pinger = Pinger()
+    private lazy var pinger = Pinger(server: pingServer, service: locationService)
 
     init() {
         let today = DailyUsage.key(for: Date())
@@ -578,7 +606,8 @@ struct PopoverView: View {
         return HStack(spacing: 10) {
             Text(location?.flag ?? "🌐").font(.system(size: 26)).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(location?.place() ?? (model.ping.failed ? "No reply from Cloudflare" : "Finding location…")).lineLimit(1)
+                Text(location?.place() ?? (model.locationService == .off ? "Ping to \(model.pingServer.title)"
+                                           : model.ping.failed ? "No reply from \(model.pingServer.title)" : "Finding location…")).lineLimit(1)
                 if let location {
                     Text(([location.ip] + [location.organization].compactMap { $0 }).joined(separator: " · "))
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
@@ -587,8 +616,9 @@ struct PopoverView: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
                 Text(model.ping.text).font(.system(size: 17, weight: .medium, design: .rounded)).monospacedDigit().foregroundStyle(color)
-                Text(location.map { $0.colo.isEmpty ? "Ping" : "Ping · \($0.colo)" } ?? "Ping").font(.caption).foregroundStyle(.secondary)
-                    .help(location?.coloCity.map { "Measured to Cloudflare's data center in \($0)" } ?? "Measured to Cloudflare's nearest data center")
+                Text("Ping · \(location.flatMap { $0.colo.isEmpty ? nil : $0.colo } ?? model.pingServer.title)")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .help(location?.coloCity.map { "Measured to Cloudflare's data center in \($0)" } ?? "Measured to \(model.pingServer.url.host ?? "")")
             }
         }
         .accessibilityElement(children: .combine)
@@ -610,6 +640,15 @@ struct PopoverView: View {
 
 struct SettingsView: View {
     @ObservedObject var model: TrafficModel
+    private var pingFooter: String {
+        let server = model.pingServer, service = model.locationService
+        var text = "Every \(Int(Pinger.interval)) seconds, Jarian times a small HTTPS request to \(server.url.host ?? server.title)."
+        if let host = service.host {
+            let when = server.reportsAddress ? "when your address changes" : "every minute and when the network changes"
+            text += " Location comes from \(host), looked up \(when)."
+        }
+        return text + " Requests take the same route as your other traffic, through any VPN or proxy, so they show what websites see. When ping is off, Jarian makes no network requests."
+    }
     var body: some View {
         Form {
             Section {
@@ -655,11 +694,21 @@ struct SettingsView: View {
             }
             Section {
                 Toggle("Measure ping and location", isOn: $model.measuresPing)
+                Picker("Ping server", selection: $model.pingServer) {
+                    ForEach(PingServer.allCases) { Text($0.title).tag($0) }
+                }
+                .disabled(!model.measuresPing)
+                Picker("Location from", selection: $model.locationService) {
+                    ForEach(LocationService.allCases.filter { $0 != .off }) { Text($0.title).tag($0) }
+                    Divider()
+                    Text(LocationService.off.title).tag(LocationService.off)
+                }
+                .disabled(!model.measuresPing)
                 Toggle("Show location and ping in menu bar", isOn: $model.showsPing).disabled(!model.measuresPing)
             } header: {
                 Text("Ping")
             } footer: {
-                Text("Every \(Int(Pinger.interval)) seconds, Jarian times a small HTTPS request to Cloudflare (speed.cloudflare.com). It takes the same route as your other traffic, through any VPN or proxy, so the ping and location are what websites see. When this is off, Jarian makes no network requests.")
+                Text(pingFooter)
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Section {
@@ -897,9 +946,12 @@ if CommandLine.arguments.contains("--probe") {
     } catch { fputs("\(error)\n", stderr); exit(1) }
 } else if CommandLine.arguments.contains("--ping") {
     // Prints each change for 30 seconds, then exits. Unchanged readings are not repeated.
-    let pinger = Pinger()
+    let saved = UserDefaults.standard
+    let pinger = Pinger(server: PingServer(rawValue: saved.string(forKey: "pingServer") ?? "") ?? .cloudflare,
+                        service: LocationService(rawValue: saved.string(forKey: "locationService") ?? "") ?? .cloudflare)
+    print("Pinging \(pinger.server.url.host ?? ""), location from \(pinger.service.host ?? "nowhere (off)")")
     pinger.onChange = { reading in
-        let location = reading.location.map { "\($0.flag ?? "") \($0.place()) · \($0.ip) · \($0.organization ?? "—") · via \($0.colo)" }
+        let location = reading.location.map { "\($0.flag ?? "") \($0.place()) · \($0.ip) · \($0.organization ?? "—")" + ($0.colo.isEmpty ? "" : " · via \($0.colo)") }
         print("\(reading.text)\(location.map { "  \($0)" } ?? "")")
     }
     pinger.start()
