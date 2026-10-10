@@ -1,37 +1,62 @@
-# Jarian
+<div align="center">
 
-*Jarian* (جریان, "flow" or "current") is a small, open-source macOS menu bar app that shows network speed. It is a native take on the [Internet Speed Monitor](https://github.com/rishuinfinity/InternetSpeedMonitor) GNOME extension. Built with Swift, SwiftUI, and AppKit, with no third-party dependencies.
+<img src="assets/app-icon.png" width="112" alt="Jarian app icon">
 
-<img src="assets/app-icon.png" width="96" alt="Jarian icon">
+# Jarian: network speed monitor for the Mac menu bar
 
-## Features
+**See your upload and download speed, data usage, and ping at a glance. Free, open source, and private.**
 
-- Upload and download speed in the menu bar, stacked on two lines or side by side, upload or download first, or one combined ⇅ value.
-- Today's data usage after “=”, as in the GNOME extension. It restarts at midnight and can be reset by hand.
-- Totals for yesterday and the last 7, 30, or 90 days, from daily totals kept for as many days as you choose.
-- Bytes (MB/s) or bits (Mb/s); updates every 1, 2, or 5 seconds.
-- Popover with live speeds, a 60-sample graph with speed and time axes (hover for exact values), today's usage, and per-interface speeds.
-- Measures all physical interfaces (Wi-Fi, Ethernet, USB, iPhone tethering) or just one. VPN tunnels, bridges, loopback, Apple peer-to-peer links (AWDL, Wi-Fi Aware), and virtual machine networks (Apple Virtualization, VMware, Parallels, VirtualBox) are skipped so traffic is not counted twice. A virtual machine's internet traffic still counts, on the physical link it goes out through.
-- Reads 64-bit kernel counters (`NET_RT_IFLIST2`), so totals don't wrap at 4 GB.
-- Optional ping and location, like the “real delay” in VPN clients such as Happ. Every 1 to 60 seconds (5 by default) Jarian times an HTTPS request to Cloudflare, Google, or Apple. The location comes from Cloudflare (country only), ipinfo.io, GeoJS, IP.SB, or ifconfig.co, or it can be turned off. All of them are free and need no account. Requests take the same route as your other traffic, through any VPN or proxy. The popover shows the ping, the country flag, the city, the IP address, and the network operator websites see. Below them, a 10-minute ping graph marks lost pings in red. Hover over it to see each ping. Like the speed graph, it lives in memory only. The menu bar can also show the flag and country code, with the ping below them. The ping is colored by how fast it is: yellow from 150 ms, red from 400 ms or when there is no reply. This can be turned off in Settings. The ping is one network round trip: the time from sending the request to the first byte of the reply. Connection setup isn't counted. When the network drops, a ping goes unanswered, or the route changes, the old ping and location are cleared rather than left on screen. Ping can be switched on and off in Settings or from the right-click menu.
-- Launch at login, from Settings.
-- Runs in the App Sandbox with Hardened Runtime, allowed only outgoing network connections: it cannot read your files or accept connections. Replies from ping and location services are capped at 64 KB and cleaned before display. Requests carry no cookies, a generic user agent, and no language preferences, so they say nothing about the app, your Mac, or you beyond the IP address any server sees.
-- No logs. With ping off (the default), Jarian has no network access of its own. With it on, Jarian contacts only the ping server and location service you choose. The speed graph lives in memory only. On disk there are only preferences and one total per day for the days you keep (at most 90), so saved data never grows over time.
+![macOS 13+](https://img.shields.io/badge/macOS-13%2B-black?logo=apple)
+![Swift](https://img.shields.io/badge/Swift-SwiftUI%20%2B%20AppKit-F05138?logo=swift&logoColor=white)
+![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
+![MIT License](https://img.shields.io/badge/license-MIT-blue)
 
-## Build and run
+</div>
 
-Requires macOS 13+ and Xcode Command Line Tools.
+<p align="center">
+  <img src="assets/screenshot.png" width="720" alt="Jarian in the macOS menu bar on a MacBook, showing live upload and download speed and ping, with its popover open: speed and ping graphs, today's data usage, and per-interface speeds">
+</p>
+
+**Jarian** (جریان, Persian for "flow") is a small, native macOS menu bar app that shows your **internet speed** in real time. It's a Mac take on the popular GNOME *Internet Speed Monitor* extension. It shows what you'd want to know about your connection, and it doesn't watch you.
+
+## Why Jarian
+
+- ⚡ **Live speed in the menu bar.** Upload and download speed, stacked or side by side, in MB/s or Mb/s.
+- 📊 **Data usage tracking.** Today's total, plus yesterday and the last 7, 30, and 90 days.
+- 📈 **Speed graph.** The last 60 seconds, plus a per-interface breakdown (Wi-Fi, Ethernet, iPhone tethering).
+- 🌍 **Ping and location (optional).** Real latency to Cloudflare, Google, or Apple, a 10-minute ping graph, and the country, IP address, and network operator that websites see. Useful with a VPN.
+- 🎯 **Accurate counts.** Skips VPN tunnels, VMs, and virtual interfaces so traffic isn't counted twice, and uses 64-bit counters so totals never wrap.
+- 🔒 **Private by design.** Runs in the App Sandbox, keeps no logs, and makes no network requests unless you turn on ping.
+- 🪶 **Lightweight.** Pure Swift with no third-party dependencies. Launches at login if you want it to.
+
+## Install
+
+Requires macOS 13 Ventura or later on Apple Silicon, and the Xcode Command Line Tools (`xcode-select --install`).
 
 ```sh
-./test.sh
-./build.sh --install   # builds, replaces /Applications/Jarian.app, and opens it
+git clone https://github.com/devbymak/jaryan.git && cd jaryan
+./build.sh --install
 ```
 
-`./build.sh` alone builds `Jarian.app` here without installing it. Only one copy runs at a time; a second launch quits immediately.
+This builds Jarian, copies it to `/Applications`, and opens it. Look for the speed readout in your menu bar. Click it for details, or right-click it for quick options.
 
-`Jarian.app/Contents/MacOS/jarian --probe` prints each interface's counters and whether it is counted. `--ping` prints ping and location readings for 30 seconds, using the providers chosen in Settings. Override them with `-pingServer google|apple|cloudflare`, `-locationService ipinfo|geojs|ipsb|ifconfig|cloudflare|off`, and `-pingInterval 1|2|5|10|30|60` before `--ping`.
+## Privacy
 
-The build is signed ad-hoc, so it runs on the Mac that built it; Gatekeeper blocks it elsewhere. To share it, sign with a Developer ID and notarize:
+With ping off (the default), Jarian has **no network access** of its own. It only reads your Mac's interface counters. With ping on, it contacts only the ping server and location service you choose, sends no cookies and a generic user agent, and caps every reply. On disk it keeps only your preferences and one total per day (at most 90 days). The App Sandbox blocks it from reading your files or accepting incoming connections.
+
+<details>
+<summary><b>For developers</b></summary>
+
+```sh
+./test.sh    # run the tests
+./build.sh   # build Jarian.app here without installing it
+```
+
+- `Jarian.app/Contents/MacOS/jarian --probe` prints each interface's counters and whether they're counted.
+- `--ping` prints ping and location readings for 30 seconds. To pick providers, put `-pingServer google|apple|cloudflare`, `-locationService ipinfo|geojs|ipsb|ifconfig|cloudflare|off`, or `-pingInterval 1|2|5|10|30|60` before it.
+- Preferences are stored in `~/Library/Containers/local.jarian`.
+
+The default build is signed ad hoc, so it runs only on the Mac that built it. To share it, sign it with a Developer ID and notarize it:
 
 ```sh
 JARIAN_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./build.sh
@@ -40,10 +65,10 @@ xcrun notarytool submit Jarian.zip --keychain-profile <profile> --wait
 xcrun stapler staple Jarian.app
 ```
 
-Because of the sandbox, preferences live in `~/Library/Containers/local.jarian`.
+`assets/icon-prompt.txt` has the prompt used to generate the app icon. The screenshot uses demo data.
 
-`assets/app-icon.png` is the app icon; `assets/icon-prompt.txt` records its image-generation prompt.
+</details>
 
 ## License
 
-MIT — see [license](license).
+MIT. See [license](license). Contributions and stars are welcome ⭐
