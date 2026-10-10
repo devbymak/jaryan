@@ -29,7 +29,7 @@ open Jarian.app
 
 `Jarian.app/Contents/MacOS/jarian --probe` prints each interface's counters and whether it is counted. `--ping` prints ping and location readings for 30 seconds, using the providers chosen in Settings. Override them with `-pingServer google|apple|cloudflare` and `-locationService ipinfo|geojs|ipsb|ifconfig|cloudflare|off` before `--ping`.
 
-`assets/draw-icon.swift` regenerates `assets/app-icon.png`.
+`assets/app-icon.png` is the app icon; `assets/icon-prompt.txt` records its image-generation prompt.
 
 ## License
 
