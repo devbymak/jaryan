@@ -76,6 +76,9 @@ final class Pinger {
     private var session: URLSession?
     private var timer: Timer?
     private var monitor: NWPathMonitor?
+    /// Network changes come in bursts, as when a VPN connects. Acting once they settle sends one ping, not one per change.
+    static let settleDelay: TimeInterval = 0.5
+    private var pendingChange: DispatchWorkItem?
     /// When the ping now in flight was sent, if one is.
     private var sentAt: TimeInterval?
     /// Bumped whenever the session is replaced, so replies to cancelled requests are ignored.
@@ -121,9 +124,15 @@ final class Pinger {
         startTimer()
         // Reports the current path at once, which sends the first ping, then again on every change, such as a VPN connecting.
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] path in self?.networkChanged(online: path.status != .unsatisfied) }
+        monitor.pathUpdateHandler = { [weak self] path in self?.pathChanged(online: path.status != .unsatisfied) }
         monitor.start(queue: .main)
         self.monitor = monitor
+    }
+    private func pathChanged(online: Bool) {
+        pendingChange?.cancel()
+        let change = DispatchWorkItem { [weak self] in self?.pendingChange = nil; self?.networkChanged(online: online) }
+        pendingChange = change
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay, execute: change)
     }
     private func startTimer() {
         timer?.invalidate()
@@ -135,6 +144,7 @@ final class Pinger {
     func stop() {
         timer?.invalidate(); timer = nil
         monitor?.cancel(); monitor = nil
+        pendingChange?.cancel(); pendingChange = nil
         resetSession(); session = nil
         places = LocationState()
         reading = PingReading()
@@ -173,6 +183,9 @@ final class Pinger {
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
+        // By default the user agent names the app and the CFNetwork and Darwin versions, and Accept-Language lists the
+        // user's languages. Send the same bare values for everyone instead, so requests say nothing about who sent them.
+        configuration.httpAdditionalHeaders = ["User-Agent": "Mozilla/5.0", "Accept-Language": "en"]
         return URLSession(configuration: configuration, delegate: nil, delegateQueue: .main)
     }
     private func tick() {
@@ -183,9 +196,6 @@ final class Pinger {
         ping()
     }
     // Requests are created at once, on the main queue, where the session is replaced. A request created later could find
-        // By default the user agent names the app and the CFNetwork and Darwin versions, and Accept-Language lists the
-        // user's languages. Send the same bare values for everyone instead, so requests say nothing about who sent them.
-        configuration.httpAdditionalHeaders = ["User-Agent": "Mozilla/5.0", "Accept-Language": "en"]
     // its session already invalidated, which raises an exception.
     private func ping() {
         guard let session, sentAt == nil else { return }
