@@ -786,123 +786,227 @@ struct PopoverView: View {
     }
 }
 
+/// A page of the Settings window, shown as a toolbar tab.
+enum SettingsPage: String, CaseIterable {
+    case general, appearance, ping, usage
+    var title: String {
+        switch self {
+        case .general: return "General"
+        case .appearance: return "Appearance"
+        case .ping: return "Ping"
+        case .usage: return "Usage"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .general: return "gearshape"
+        case .appearance: return "menubar.rectangle"
+        case .ping: return "stopwatch"
+        case .usage: return "chart.bar"
+        }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var model: TrafficModel
-    private var pingFooter: String {
-        let server = model.pingServer, service = model.locationService
-        let every = model.pingInterval == 1 ? "second" : model.pingInterval == 60 ? "minute" : "\(Int(model.pingInterval)) seconds"
-        var text = "Every \(every), Jarian times a small HTTPS request to \(server.url.host ?? server.title)."
-        if let host = service.host {
-            let when = server.reportsAddress ? "when your address changes" : "every minute and when the network changes"
-            text += " Location comes from \(host), looked up \(when)."
-        }
-        if model.colorsPing { text += " Ping turns yellow from 150 ms, and red from 400 ms or when there is no reply." }
-        return text + " Requests take the same route as your other traffic, through any VPN or proxy, so they show what websites see. When ping is off, Jarian makes no network requests."
-    }
+    let page: SettingsPage
     var body: some View {
         Form {
-            Section {
-                Picker("Layout", selection: $model.stacked) {
-                    Text("Stacked").tag(true)
-                    Text("Side by side").tag(false)
-                }
-                .pickerStyle(.segmented)
-                Picker("Show", selection: $model.style) {
-                    Text("↑ Upload  ↓ Download").tag(MenuBarStyle.uploadFirst)
-                    Text("↓ Download  ↑ Upload").tag(MenuBarStyle.downloadFirst)
-                    Text("⇅ Combined").tag(MenuBarStyle.combined)
-                }
-                Toggle("Show “/s” after speeds", isOn: $model.showsPerSecond)
-                Toggle("Show today's data usage", isOn: $model.showsUsage)
-                Picker("Units", selection: $model.unit) {
-                    Text("Bytes (MB/s)").tag(SpeedUnit.bytes)
-                    Text("Bits (Mb/s)").tag(SpeedUnit.bits)
-                }
-            } header: {
-                Text("Menu Bar")
-            } footer: {
-                Text("Usage appears after “=”. 1 KB = 1000 bytes, as in Finder.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            Section {
-                Picker("Interface", selection: $model.interface) {
-                    Text("All interfaces").tag("")
-                    ForEach(model.interfaceChoices, id: \.self) { name in
-                        Text("\(model.title(for: name)) (\(name))").tag(name)
-                    }
-                }
-                Picker("Update every", selection: $model.interval) {
-                    Text("1 second").tag(1.0)
-                    Text("2 seconds").tag(2.0)
-                    Text("5 seconds").tag(5.0)
-                }
-            } header: {
-                Text("Monitoring")
-            } footer: {
-                Text("“All interfaces” adds up Wi-Fi, Ethernet, and other physical links. VPN, bridge, loopback, and virtual machine interfaces are skipped so no traffic is counted twice; a virtual machine's internet traffic still counts, on the physical link it uses.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            Section {
-                Toggle("Measure ping and location", isOn: $model.measuresPing)
-                Picker("Ping server", selection: $model.pingServer) {
-                    ForEach(PingServer.allCases) { Text($0.title).tag($0) }
-                }
-                .disabled(!model.measuresPing)
-                Picker("Ping every", selection: $model.pingInterval) {
-                    ForEach(Pinger.intervalChoices, id: \.self) { seconds in
-                        Text(seconds == 1 ? "1 second" : seconds == 60 ? "1 minute" : "\(Int(seconds)) seconds").tag(seconds)
-                    }
-                }
-                .disabled(!model.measuresPing)
-                Picker("Location from", selection: $model.locationService) {
-                    ForEach(LocationService.allCases.filter { $0 != .off }) { Text($0.title).tag($0) }
-                    Divider()
-                    Text(LocationService.off.title).tag(LocationService.off)
-                }
-                .disabled(!model.measuresPing)
-                Toggle("Show location and ping in menu bar", isOn: $model.showsPing).disabled(!model.measuresPing)
-                Toggle("Color ping by speed", isOn: $model.colorsPing).disabled(!model.measuresPing)
-            } header: {
-                Text("Ping")
-            } footer: {
-                Text(pingFooter)
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            Section {
-                Toggle("Open at login", isOn: Binding(get: { model.opensAtLogin }, set: { model.setOpensAtLogin($0) }))
-                if let message = model.loginMessage {
-                    Text(message).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                }
-                HStack {
-                    Text("Today: \(Format.amount(model.usage.total))").monospacedDigit()
-                    Spacer()
-                    Button("Reset Today", action: model.resetUsage)
-                }
-            } header: {
-                Text("General")
-            }
-            Section {
-                Picker("Keep daily totals for", selection: $model.retention) {
-                    Text("Today only").tag(1)
-                    Text("7 days").tag(7)
-                    Text("30 days").tag(30)
-                    Text("90 days").tag(90)
-                }
-                HStack {
-                    Text("\(model.past.days.count) past \(model.past.days.count == 1 ? "day" : "days") saved").foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Clear History", action: model.clearHistory).disabled(model.past.days.isEmpty)
-                }
-            } header: {
-                Text("History")
-            } footer: {
-                Text("Saved on disk: one total per day for the days you keep, at most 90, so it never grows over time. The speed graph stays in memory. Usage counts all physical interfaces while Jarian is running. No logs are written.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            switch page {
+            case .general: general
+            case .appearance: appearance
+            case .ping: ping
+            case .usage: usage
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440)
+        .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private var general: some View {
+        Section {
+            Toggle("Launch at login", isOn: Binding(get: { model.opensAtLogin }, set: { model.setOpensAtLogin($0) }))
+            if let message = model.loginMessage { warning(message) }
+        }
+        Section {
+            Picker("Interface", selection: $model.interface) {
+                Text("All interfaces").tag("")
+                ForEach(model.interfaceChoices, id: \.self) { name in
+                    Text("\(model.title(for: name)) (\(name))").tag(name)
+                }
+            }
+            Picker("Update every", selection: $model.interval) {
+                Text("1 second").tag(1.0)
+                Text("2 seconds").tag(2.0)
+                Text("5 seconds").tag(5.0)
+            }
+        } header: {
+            Text("Monitoring")
+        } footer: {
+            footer("“All interfaces” adds up Wi-Fi, Ethernet, and other physical links. VPN, bridge, loopback, and virtual machine interfaces are skipped so no traffic is counted twice; a virtual machine's internet traffic still counts, on the physical link it uses.")
+        }
+    }
+
+    @ViewBuilder private var appearance: some View {
+        Section {
+            Picker("Layout", selection: $model.stacked) {
+                Text("Side by side").tag(false)
+                Text("Stacked").tag(true)
+            }
+            .pickerStyle(.segmented)
+            Picker("Show", selection: $model.style) {
+                Text("↑ Upload  ↓ Download").tag(MenuBarStyle.uploadFirst)
+                Text("↓ Download  ↑ Upload").tag(MenuBarStyle.downloadFirst)
+                Text("⇅ Combined").tag(MenuBarStyle.combined)
+            }
+            Picker("Units", selection: $model.unit) {
+                Text("Bytes (MB/s)").tag(SpeedUnit.bytes)
+                Text("Bits (Mb/s)").tag(SpeedUnit.bits)
+            }
+            Toggle("Show “/s” after speeds", isOn: $model.showsPerSecond)
+            Toggle(isOn: $model.showsUsage) {
+                Text("Today's data usage")
+                Text("Appears after “=”. 1 KB = 1000 bytes, as in Finder.")
+            }
+        } header: {
+            Text("Menu Bar")
+        }
+        Section {
+            Toggle(isOn: $model.showsPing) {
+                Text("Location and ping")
+                Text("The country's flag and code, with the ping below them.")
+            }
+            Toggle(isOn: $model.colorsPing) {
+                Text("Color by speed")
+                Text("Ping turns yellow from 150 ms, and red from 400 ms or when there is no reply.")
+            }
+        } header: {
+            Text("Ping")
+        } footer: {
+            if !model.measuresPing { footer("Turn on ping in the Ping tab to show it here.") }
+        }
+        .disabled(!model.measuresPing)
+    }
+
+    @ViewBuilder private var ping: some View {
+        Section {
+            Toggle(isOn: $model.measuresPing) {
+                Text("Measure ping and location")
+                Text("When off, Jarian makes no network requests.")
+            }
+        }
+        Section {
+            Picker("Server", selection: $model.pingServer) {
+                ForEach(PingServer.allCases) { Text($0.title).tag($0) }
+            }
+            Picker("Ping every", selection: $model.pingInterval) {
+                ForEach(Pinger.intervalChoices, id: \.self) { seconds in
+                    Text(seconds == 1 ? "1 second" : seconds == 60 ? "1 minute" : "\(Int(seconds)) seconds").tag(seconds)
+                }
+            }
+        } header: {
+            Text("Ping")
+        } footer: {
+            footer(pingFooter)
+        }
+        .disabled(!model.measuresPing)
+        Section {
+            Picker("Look up from", selection: $model.locationService) {
+                ForEach(LocationService.allCases.filter { $0 != .off }) { Text($0.title).tag($0) }
+                Divider()
+                Text(LocationService.off.title).tag(LocationService.off)
+            }
+        } header: {
+            Text("Location")
+        } footer: {
+            if let locationFooter { footer(locationFooter) }
+        }
+        .disabled(!model.measuresPing)
+    }
+
+    @ViewBuilder private var usage: some View {
+        Section {
+            LabeledContent("Today") {
+                HStack {
+                    Text(Format.amount(model.usage.total)).monospacedDigit()
+                    Button("Reset", action: model.resetUsage)
+                }
+            }
+        }
+        Section {
+            Picker("Keep daily totals for", selection: $model.retention) {
+                Text("Today only").tag(1)
+                Text("7 days").tag(7)
+                Text("30 days").tag(30)
+                Text("90 days").tag(90)
+            }
+            LabeledContent("Saved") {
+                HStack {
+                    Text("\(model.past.days.count) past \(model.past.days.count == 1 ? "day" : "days")").monospacedDigit()
+                    Button("Clear History", action: model.clearHistory).disabled(model.past.days.isEmpty)
+                }
+            }
+        } header: {
+            Text("History")
+        } footer: {
+            footer("Saved on disk: one total per day for the days you keep, at most 90, so it never grows over time. The speed graph stays in memory. Usage counts all physical interfaces while Jarian is running. No logs are written.")
+        }
+    }
+
+    private var pingFooter: String {
+        let seconds = model.pingInterval, server = model.pingServer
+        let every = seconds == 1 ? "second" : seconds == 60 ? "minute" : "\(Int(seconds)) seconds"
+        return "Every \(every), Jarian times a small HTTPS request to \(server.url.host ?? server.title). "
+            + "Requests take the same route as your other traffic, through any VPN or proxy, so they show what websites see."
+    }
+    private var locationFooter: String? {
+        guard let host = model.locationService.host else { return nil }
+        let when = model.pingServer.reportsAddress ? "when your address changes" : "every minute and when the network changes"
+        return "Location comes from \(host), looked up \(when)."
+    }
+    private func warning(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+    }
+    private func footer(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Settings as toolbar tabs, like the system's own settings windows. The window fits each page as it is selected.
+final class SettingsTabs: NSTabViewController {
+    private var sizeWatch: NSKeyValueObservation?
+    init(model: TrafficModel) {
+        super.init(nibName: nil, bundle: nil)
+        tabStyle = .toolbar
+        transitionOptions = []
+        for page in SettingsPage.allCases {
+            let host = NSHostingController(rootView: SettingsView(model: model, page: page))
+            host.sizingOptions = .preferredContentSize
+            host.title = page.title  // The window takes the selected page's title.
+            let item = NSTabViewItem(viewController: host)
+            item.identifier = page.rawValue
+            item.label = page.title
+            item.image = NSImage(systemSymbolName: page.symbol, accessibilityDescription: page.title)
+            addTabViewItem(item)
+        }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+    override func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: item)
+        guard let page = item?.viewController else { return }
+        // Follow the page as it grows or shrinks, such as when a warning appears.
+        sizeWatch = page.observe(\.preferredContentSize, options: [.initial, .new]) { [weak self] page, _ in
+            DispatchQueue.main.async { self?.fit(page.preferredContentSize) }
+        }
+    }
+    /// Keeps the title bar in place, the way system settings windows resize.
+    private func fit(_ size: NSSize) {
+        guard let window = view.window, size.width > 0, size.height > 0 else { return }
+        let frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        guard frame.size != window.frame.size else { return }
+        window.setFrame(NSRect(x: window.frame.minX, y: window.frame.maxY - frame.height, width: frame.width, height: frame.height),
+                        display: true, animate: window.isVisible)
     }
 }
 
@@ -1079,14 +1183,13 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func openSettings() {
         popover.performClose(nil)
         if settingsWindow == nil {
-            let host = NSHostingController(rootView: SettingsView(model: model))
-            host.sizingOptions = .preferredContentSize
-            let window = NSWindow(contentViewController: host)
-            window.title = "Jarian Settings"
+            let tabs = SettingsTabs(model: model)
+            let window = NSWindow(contentViewController: tabs)
             window.styleMask = [.titled, .closable]
+            window.toolbarStyle = .preference
             window.isReleasedWhenClosed = false
-            // Size to the SwiftUI content first; centering the default-sized window leaves it off-center once it grows.
-            window.setContentSize(host.view.fittingSize)
+            // Size to the first page before centering; centering the default-sized window leaves it off-center once it grows.
+            if let page = tabs.tabViewItems.first?.viewController { window.setContentSize(page.view.fittingSize) }
             window.center()
             settingsWindow = window
         }
