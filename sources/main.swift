@@ -384,15 +384,6 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                HStack {
-                    Spacer()
-                    Image(nsImage: MenuBarRenderer(model: model).image(model.menuBarItems))
-                        .renderingMode(.template).foregroundStyle(.primary)
-                        .padding(.horizontal, 10)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.12)))
-                        .accessibilityLabel("Menu bar preview")
-                    Spacer()
-                }
                 Picker("Layout", selection: $model.stacked) {
                     Text("Stacked").tag(true)
                     Text("Side by side").tag(false)
@@ -471,7 +462,7 @@ struct SettingsView: View {
     }
 }
 
-/// Draws the menu bar readings. Shared by the status item and the Settings preview.
+/// Draws the menu bar readings.
 struct MenuBarRenderer {
     let stacked: Bool
     let unit: SpeedUnit

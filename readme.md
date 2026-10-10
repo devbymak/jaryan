@@ -6,7 +6,7 @@
 
 ## Features
 
-- Upload and download speed in the menu bar, stacked on two lines or side by side, upload or download first, or one combined ⇅ value. Settings shows a live preview.
+- Upload and download speed in the menu bar, stacked on two lines or side by side, upload or download first, or one combined ⇅ value.
 - Today's data usage after “=”, as in the GNOME extension. It restarts at midnight and can be reset by hand.
 - Totals for yesterday and the last 7, 30, or 90 days, from daily totals kept for as many days as you choose.
 - Bytes (MB/s) or bits (Mb/s); updates every 1, 2, or 5 seconds.
