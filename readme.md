@@ -30,6 +30,15 @@ open Jarian.app
 
 `Jarian.app/Contents/MacOS/jarian --probe` prints each interface's counters and whether it is counted. `--ping` prints ping and location readings for 30 seconds, using the providers chosen in Settings. Override them with `-pingServer google|apple|cloudflare`, `-locationService ipinfo|geojs|ipsb|ifconfig|cloudflare|off`, and `-pingInterval 1|2|5|10|30|60` before `--ping`.
 
+The build is signed ad-hoc, so it runs on the Mac that built it; Gatekeeper blocks it elsewhere. To share it, sign with a Developer ID and notarize:
+
+```sh
+JARIAN_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./build.sh
+ditto -c -k --keepParent Jarian.app Jarian.zip
+xcrun notarytool submit Jarian.zip --keychain-profile <profile> --wait
+xcrun stapler staple Jarian.app
+```
+
 Because of the sandbox, preferences live in `~/Library/Containers/local.jarian`. The first sandboxed launch moves them there from `~/Library/Preferences`, so builds from before the sandbox will start with default settings.
 
 `assets/app-icon.png` is the app icon; `assets/icon-prompt.txt` records its image-generation prompt.

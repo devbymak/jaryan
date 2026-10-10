@@ -44,5 +44,10 @@ cat > 'Jarian.app/Contents/Resources/container-migration.plist' <<'PLIST'
 <key>Move</key><array><string>${Library}/Preferences/local.jarian.plist</string></array>
 </dict></plist>
 PLIST
-codesign --force --sign - --options runtime --entitlements .build/jarian.entitlements 'Jarian.app'
+# Ad-hoc by default, which runs only on this Mac. To share the app, set JARIAN_SIGN_IDENTITY to a Developer ID
+# Application identity, then notarize it (see readme.md); a secure timestamp is required for notarization.
+identity="${JARIAN_SIGN_IDENTITY:--}"
+timestamp=()
+[[ "$identity" == - ]] || timestamp=(--timestamp)
+codesign --force --sign "$identity" "${timestamp[@]}" --options runtime --entitlements .build/jarian.entitlements 'Jarian.app'
 echo 'Built Jarian.app'

@@ -316,12 +316,23 @@ enum LocationService: String, CaseIterable, Identifiable {
         return NetworkLocation.parsed(ip: text("ip"), country: text(country), city: text("city"),
                                       organization: operators.lazy.compactMap(text).first.map(Self.withoutASN))
     }
-    /// "AS13335 Cloudflare, Inc." → "Cloudflare, Inc."
+    /// "AS13335 Cloudflare, Inc." → "Cloudflare, Inc." A name that is only an AS number stays as it is.
     static func withoutASN(_ name: String) -> String {
-        guard name.hasPrefix("AS"), let space = name.firstIndex(of: " "),
-              name[name.index(name.startIndex, offsetBy: 2)..<space].allSatisfy(\.isNumber) else { return name }
-        return String(name[name.index(after: space)...])
+        guard name.hasPrefix("AS"), let space = name.firstIndex(of: " ") else { return name }
+        let number = name[name.index(name.startIndex, offsetBy: 2)..<space]
+        let rest = name[name.index(after: space)...].trimmingCharacters(in: .whitespaces)
+        guard !number.isEmpty, number.allSatisfy({ ("0"..."9").contains($0) }), !rest.isEmpty else { return name }
+        return rest
     }
+}
+
+/// Keeps location lookups apart. Every lost ping clears the location, so on a flaky connection with pings every
+/// second, lookups would otherwise go out every couple of seconds and soon hit the free services' limits.
+struct LookupPacer {
+    static let gap: TimeInterval = 15
+    private var last: TimeInterval?
+    func allows(at now: TimeInterval) -> Bool { last.map { now - $0 >= Self.gap } ?? true }
+    mutating func record(at now: TimeInterval) { last = now }
 }
 
 /// What the ping server reports about the connection, combined with what the location service looked up.
@@ -351,8 +362,6 @@ struct LocationState: Equatable {
         guard traced == self.traced?.ip else { return }
         details = location; detailsFor = traced
     }
-    /// Look again at the next chance, as after the network changes. What is shown stays until then.
-    mutating func refresh() { requestedAt = nil; requestedFor = nil }
     var location: NetworkLocation? {
         guard let details else { return traced }
         guard let traced else { return details }

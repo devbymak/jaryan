@@ -71,6 +71,8 @@ final class Pinger {
         }
     }
     private var places = LocationState()
+    /// Not reset with `places`, so clearing the location never lets lookups crowd together.
+    private var pacer = LookupPacer()
     private var session: URLSession?
     private var timer: Timer?
     private var monitor: NWPathMonitor?
@@ -200,15 +202,17 @@ final class Pinger {
                 next.location = self.places.location
             }
             self.reading = next
-            if self.service != .off, self.places.needsLookup(at: monotonicSeconds(), interval: LocationService.interval) {
+            let now = monotonicSeconds()
+            if self.service != .off, self.places.needsLookup(at: now, interval: LocationService.interval), self.pacer.allows(at: now) {
                 self.lookUp(session, generation: generation)
             }
         }
     }
     /// Adds the city and network operator. Best effort: with Cloudflare pings, the trace alone gives the country.
     private func lookUp(_ session: URLSession, generation: Int) {
-        let service = service
-        let traced = places.lookingUp(at: monotonicSeconds())
+        let service = service, now = monotonicSeconds()
+        let traced = places.lookingUp(at: now)
+        pacer.record(at: now)
         func attempt(_ requests: ArraySlice<URLRequest>) {
             guard let request = requests.first else { return }
             Exchange.send(request, on: session) { [weak self] data, _ in
@@ -299,7 +303,8 @@ final class TrafficModel: ObservableObject {
     private var sampler = TrafficSampler()
     private var names = interfaceDisplayNames()
     private var namesReadAt = monotonicSeconds()
-    private var refreshes = 0
+    /// Usage is saved once a minute while running, and also on sleep, at quit, and at midnight.
+    private var savedAt = monotonicSeconds()
     private lazy var pinger = Pinger(server: pingServer, service: locationService, interval: pingInterval)
 
     init() {
@@ -371,8 +376,7 @@ final class TrafficModel: ObservableObject {
         if shown.contains(where: { names[$0.name] == nil }), now - namesReadAt >= 30 { names = interfaceDisplayNames(); namesReadAt = now }
         active = shown.map { ActiveInterface(name: $0.name, title: title(for: $0.name),
                                              rate: sample.throughput(where: { [name = $0.name] in $0 == name })) }
-        refreshes += 1
-        if refreshes % 10 == 0 { saveUsage() }
+        if now - savedAt >= 60 { saveUsage() }
         onUpdate?()
     }
     func resetUsage() {
@@ -384,6 +388,7 @@ final class TrafficModel: ObservableObject {
         saveUsage(); onUpdate?()
     }
     func saveUsage() {
+        savedAt = monotonicSeconds()
         defaults.set(usage.day, forKey: "usageDay")
         defaults.set(Double(usage.received), forKey: "usageReceived")
         defaults.set(Double(usage.sent), forKey: "usageSent")

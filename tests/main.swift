@@ -144,6 +144,8 @@ check(located(.ipinfo, #"{"error":"rate limited"}"#) == nil && located(.geojs, "
       "Errors and pages are not locations")
 check(LocationService.withoutASN("AS13335 Cloudflare, Inc.") == "Cloudflare, Inc." && LocationService.withoutASN("ASUS Net") == "ASUS Net",
       "Only a real AS number is dropped")
+check(LocationService.withoutASN("AS1  X") == "X" && LocationService.withoutASN("AS1 ") == "AS1 " && LocationService.withoutASN("AS X") == "AS X",
+      "No leading space, and a bare AS number is kept")
 check(LocationService.allCases.allSatisfy { $0.requests.allSatisfy { $0.allHTTPHeaderFields?.isEmpty ?? true } },
       "Lookups send no made-up headers")
 check(LocationService.off.requests.isEmpty && LocationService.cloudflare.requests.count == 1
@@ -190,8 +192,10 @@ let stale = state.lookingUp(at: 1)
 state.trace(NetworkLocation(ip: "9.9.9.9", country: "US", colo: "SJC"))
 state.found(details, for: stale)
 check(state.location?.city == nil, "A lookup for an older address is dropped")
-state.refresh()
-check(state.needsLookup(at: 2, interval: 60), "Refresh looks again")
+var pacer = LookupPacer()
+check(pacer.allows(at: 0), "The first lookup goes out at once")
+pacer.record(at: 0)
+check(!pacer.allows(at: LookupPacer.gap - 1) && pacer.allows(at: LookupPacer.gap), "Lookups stay apart")
 
 // Ping history
 var pings = PingHistory()
