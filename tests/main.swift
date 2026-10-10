@@ -104,4 +104,54 @@ check(MenuBar.columns(combined, stacked: true).map { $0.map(\.symbol) } == [["�
 check(MenuBar.columns(MenuBar.items(rate: rate, usage: nil, style: .combined, unit: .bytes), stacked: true).map(\.count) == [1],
       "A lone combined speed is one line")
 
+
+// Ping and location
+check(Format.ping(0.0424) == "42 ms" && Format.ping(0.0001) == "1 ms" && Format.ping(.nan) == "1 ms", "Ping in whole milliseconds")
+check(PingReading().text == "– ms" && PingReading(failed: true).text == "timeout", "Ping before a reply and after a failure")
+check(PingReading(latency: 0.05).quality == .good && PingReading(latency: 0.2).quality == .fair
+      && PingReading(latency: 0.5).quality == .poor && PingReading(failed: true).quality == .poor && PingReading().quality == nil,
+      "Ping quality")
+let trace = Cloudflare.trace("fl=1\nh=speed.cloudflare.com\nip=104.28.200.67\ncolo=SOF\nloc=GE\nwarp=on\n")
+check(trace == NetworkLocation(ip: "104.28.200.67", country: "GE", colo: "SOF"), "Trace gives address, country, and data center")
+check(Cloudflare.trace("<html>blocked</html>") == nil, "A page without an address is not a trace")
+let meta = Cloudflare.meta(Data("""
+    {"clientIp":"104.28.200.67","asn":13335,"asOrganization":"Cloudflare, Inc.","country":"GE","city":"Tbilisi",
+     "colo":{"iata":"SOF","city":"Sofia","cca2":"BG"}}
+    """.utf8))
+check(meta == NetworkLocation(ip: "104.28.200.67", country: "GE", city: "Tbilisi", organization: "Cloudflare, Inc.",
+                              colo: "SOF", coloCity: "Sofia"), "Meta adds city, operator, and data center city")
+check(Cloudflare.meta(Data(#"{"clientIp":"1.2.3.4","country":"DE","city":"","colo":"FRA"}"#.utf8))
+      == NetworkLocation(ip: "1.2.3.4", country: "DE", colo: "FRA"), "Older meta with a plain colo code")
+check(Cloudflare.meta(Data("{}".utf8)) == nil, "Empty meta is ignored")
+let english = Locale(identifier: "en_US")
+check(meta?.place(locale: english) == "Tbilisi, Georgia" && trace?.place(locale: english) == "Georgia", "Place names")
+check(meta?.flag == "🇬🇪" && NetworkLocation(ip: "", country: "XX", colo: "").flag == nil
+      && NetworkLocation(ip: "", country: "T1", colo: "").flag == nil, "Flags only for real regions")
+if let meta {
+    check(meta.updated(by: NetworkLocation(ip: meta.ip, country: "GE", colo: "SOF")) == meta, "Same address keeps details")
+    check(meta.updated(by: NetworkLocation(ip: meta.ip, country: "GE", colo: "IST")).city == "Tbilisi"
+          && meta.updated(by: NetworkLocation(ip: meta.ip, country: "GE", colo: "IST")).coloCity == nil, "A new data center drops its old city")
+    check(meta.updated(by: NetworkLocation(ip: "5.6.7.8", country: "NL", colo: "AMS")).city == nil, "A new address starts over")
+    let located = PingReading(latency: 0.291, location: meta)
+    check(MenuBar.pingColumns(located, stacked: true) == [["🇬🇪 GE", "291 ms"]], "Stacked: flag and country over the ping")
+    check(MenuBar.pingColumns(located, stacked: false) == [["🇬🇪 GE"], ["291 ms"]], "Side by side: location, then ping")
+}
+check(MenuBar.pingColumns(PingReading(failed: true), stacked: true) == [["timeout"]], "Only the ping until the location is known")
+check(MenuBar.pingColumns(PingReading(latency: 0.05, location: NetworkLocation(ip: "1.2.3.4", country: "T1", colo: "")), stacked: true)
+      == [["T1", "50 ms"]], "A code without a flag is shown alone")
+
+// Ping history
+var pings = PingHistory()
+check(pings.summary(interval: 5) == "Last 10 min" && pings.average == nil, "Empty history")
+pings.record(PingSample(time: 1, latency: 0.2))
+pings.record(PingSample(time: 2, latency: nil))
+pings.record(PingSample(time: 3, latency: 0.4))
+check(pings.lost == 1 && pings.average.map { abs($0 - 0.3) < 1e-9 } == true, "Loss and average ignore lost pings in the average")
+check(pings.summary(interval: 5) == "Last 10 min · avg 300 ms · 1 lost", "History summary")
+for index in 0..<300 { pings.record(PingSample(time: Double(index), latency: 0.1)) }
+check(pings.samples.count == PingHistory.capacity && pings.lost == 0, "History is bounded and old losses age out")
+check(pings.summary(interval: 5).hasSuffix("no loss"), "No loss")
+check(Format.age(1) == "Now" && Format.age(25) == "25 s ago" && Format.age(120) == "2 min ago" && Format.age(185) == "3 min 5 s ago",
+      "Ages")
+
 print("All \(checks) checks passed")

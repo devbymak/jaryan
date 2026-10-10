@@ -173,6 +173,115 @@ enum Format {
     static func amount(_ bytes: UInt64) -> String {
         bytes < 1000 ? "\(bytes) B" : scaled(Double(bytes), from: 0) + "B"
     }
+    /// "Now", "25 s ago", "3 min 5 s ago".
+    static func age(_ seconds: TimeInterval) -> String {
+        let whole = Int(max(0, seconds.isFinite ? seconds : 0).rounded())
+        if whole < 3 { return "Now" }
+        if whole < 60 { return "\(whole) s ago" }
+        return "\(whole / 60) min" + (whole % 60 == 0 ? "" : " \(whole % 60) s") + " ago"
+    }
+    /// "42 ms", never below 1 ms.
+    static func ping(_ seconds: TimeInterval) -> String {
+        "\(max(1, Int((seconds.isFinite ? seconds : 0) * 1000 + 0.5))) ms"
+    }
+}
+
+/// Where Cloudflare sees the connection coming from: the exit of any VPN or proxy in use.
+struct NetworkLocation: Equatable {
+    var ip: String
+    /// ISO region code, as in "DE".
+    var country: String
+    var city: String?
+    /// Network operator, such as an ISP or VPN host.
+    var organization: String?
+    /// Cloudflare data center that answered, as an IATA airport code ("FRA").
+    var colo: String
+    var coloCity: String?
+    /// The flag emoji for `country`, if it is a real region code. Cloudflare uses "XX" for unknown and "T1" for Tor.
+    var flag: String? {
+        let code = country.uppercased()
+        let letters = code.unicodeScalars
+        guard letters.count == 2, code != "XX", letters.allSatisfy({ ("A"..."Z").contains($0) }) else { return nil }
+        return String(String.UnicodeScalarView(letters.compactMap { UnicodeScalar(0x1F1E6 - 65 + $0.value) }))
+    }
+    /// "Frankfurt am Main, Germany", or just the country when the city is unknown.
+    func place(locale: Locale = .current) -> String {
+        let name = locale.localizedString(forRegionCode: country) ?? country
+        return [city, name].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+    /// A newer trace for the same address keeps the looked-up details; a new address replaces them.
+    func updated(by trace: NetworkLocation) -> NetworkLocation {
+        guard trace.ip == ip else { return trace }
+        var next = self
+        if trace.colo != colo { next.colo = trace.colo; next.coloCity = nil }
+        return next
+    }
+}
+
+enum Cloudflare {
+    /// "ip=1.2.3.4\nloc=DE\ncolo=FRA\n…" from /cdn-cgi/trace.
+    static func trace(_ text: String) -> NetworkLocation? {
+        var fields: [String: String] = [:]
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard let equals = line.firstIndex(of: "=") else { continue }
+            fields[String(line[..<equals])] = String(line[line.index(after: equals)...])
+        }
+        guard let ip = fields["ip"], !ip.isEmpty else { return nil }
+        return NetworkLocation(ip: ip, country: fields["loc"] ?? "", colo: fields["colo"] ?? "")
+    }
+    /// The JSON from speed.cloudflare.com/meta, which adds the city and network operator.
+    static func meta(_ data: Data) -> NetworkLocation? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ip = json["clientIp"] as? String, !ip.isEmpty else { return nil }
+        func text(_ value: Any?) -> String? { (value as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        // "colo" is an object with the data center's details; older responses gave just the code.
+        let colo = json["colo"] as? [String: Any]
+        return NetworkLocation(ip: ip, country: text(json["country"]) ?? "", city: text(json["city"]),
+                               organization: text(json["asOrganization"]),
+                               colo: text(colo?["iata"]) ?? text(json["colo"]) ?? "", coloCity: text(colo?["city"]))
+    }
+}
+
+/// The latest ping to Cloudflare and where the connection exits.
+struct PingReading: Equatable {
+    enum Quality { case good, fair, poor }
+    /// Seconds for the last round trip, or nil if it failed or none has finished yet.
+    var latency: TimeInterval?
+    var failed = false
+    var location: NetworkLocation?
+    var history = PingHistory()
+    var text: String { latency.map(Format.ping) ?? (failed ? "timeout" : "– ms") }
+    var quality: Quality? {
+        guard let latency else { return failed ? .poor : nil }
+        return latency < 0.15 ? .good : latency < 0.4 ? .fair : .poor
+    }
+}
+
+/// One ping: when it finished, on the monotonic clock, and its round trip, or nil if there was no reply.
+struct PingSample: Equatable {
+    var time: TimeInterval
+    var latency: TimeInterval?
+}
+
+/// The last few minutes of pings, kept in memory only.
+struct PingHistory: Equatable {
+    static let capacity = 120
+    private(set) var samples: [PingSample] = []
+    mutating func record(_ sample: PingSample) {
+        samples.append(sample)
+        if samples.count > Self.capacity { samples.removeFirst(samples.count - Self.capacity) }
+    }
+    var lost: Int { samples.filter { $0.latency == nil }.count }
+    var average: TimeInterval? {
+        let replies = samples.compactMap(\.latency)
+        return replies.isEmpty ? nil : replies.reduce(0, +) / Double(replies.count)
+    }
+    /// "Last 10 min · avg 245 ms · 2 lost", or "… · no loss".
+    func summary(interval: TimeInterval) -> String {
+        let window = Int(Double(Self.capacity) * interval / 60)
+        return (["Last \(window) min"] + [average.map { "avg \(Format.ping($0))" }].compactMap { $0 }
+                + [samples.isEmpty ? nil : lost == 0 ? "no loss" : "\(lost) lost"].compactMap { $0 }).joined(separator: " · ")
+    }
 }
 
 /// One menu bar entry: a symbol ("↑", "↓", "⇅", "=") and its value.
@@ -200,5 +309,13 @@ enum MenuBar {
     static func columns(_ items: [MenuBarItem], stacked: Bool) -> [[MenuBarItem]] {
         guard stacked else { return items.map { [$0] } }
         return stride(from: 0, to: items.count, by: 2).map { Array(items[$0..<min($0 + 2, items.count)]) }
+    }
+    /// Flag and country code over the ping: one column when stacked, two side by side. Just the ping until the location is known.
+    static func pingColumns(_ reading: PingReading, stacked: Bool) -> [[String]] {
+        var lines = [reading.text]
+        if let location = reading.location, !location.country.isEmpty {
+            lines.insert(([location.flag].compactMap { $0 } + [location.country.uppercased()]).joined(separator: " "), at: 0)
+        }
+        return stacked ? [lines] : lines.map { [$0] }
     }
 }

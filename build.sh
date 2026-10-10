@@ -10,7 +10,7 @@ done
 mkdir -p .build/module-cache
 jarian_cache_path="$(cd .build/module-cache && pwd -P)"
 xcrun swift -module-cache-path "$jarian_cache_path" sources/icon.swift .build/app-icon.iconset 'Jarian.app/Contents/Resources/app-icon.icns'
-xcrun swiftc -target arm64-apple-macosx13.0 -module-cache-path "$jarian_cache_path" -swift-version 5 -O -framework AppKit -framework SystemConfiguration -framework ServiceManagement sources/traffic.swift sources/main.swift -o 'Jarian.app/Contents/MacOS/jarian'
+xcrun swiftc -target arm64-apple-macosx13.0 -module-cache-path "$jarian_cache_path" -swift-version 5 -O -framework AppKit -framework SystemConfiguration -framework ServiceManagement -framework Network sources/traffic.swift sources/main.swift -o 'Jarian.app/Contents/MacOS/jarian'
 cat > 'Jarian.app/Contents/Info.plist' <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Darwin
+import Network
 import ServiceManagement
 import SystemConfiguration
 
@@ -51,6 +52,110 @@ func interfaceDisplayNames() -> [String: String] {
 /// Seconds on a clock that keeps counting during sleep and ignores wall-clock changes.
 func monotonicSeconds() -> TimeInterval { Double(clock_gettime_nsec_np(CLOCK_MONOTONIC)) / 1e9 }
 
+/// Times a tiny HTTPS request to Cloudflare. It takes the same route as other traffic, through any VPN or proxy, so it
+/// measures the delay websites actually see, like Happ's "real delay". Nothing is sent while it is stopped.
+final class Pinger {
+    static let interval: TimeInterval = 5
+    private static let trace = URL(string: "https://speed.cloudflare.com/cdn-cgi/trace")!
+    private static let meta = URL(string: "https://speed.cloudflare.com/meta")!
+    var onChange: ((PingReading) -> Void)?
+    private(set) var reading = PingReading() { didSet { if reading != oldValue { onChange?(reading) } } }
+    private var session: URLSession?
+    private var timer: Timer?
+    private var monitor: NWPathMonitor?
+    private var inFlight = false
+    /// Bumped whenever the session is replaced, so replies to cancelled requests are ignored.
+    private var generation = 0
+    /// Address whose city and operator were last looked up.
+    private var detailsIP: String?
+
+    /// Records only the request-to-first-byte time, without DNS, TCP, and TLS setup: one network round trip.
+    private final class Timing: NSObject, URLSessionTaskDelegate {
+        var roundTrip: TimeInterval?
+        func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+            guard let last = metrics.transactionMetrics.last, let start = last.requestStartDate,
+                  let end = last.responseStartDate else { return }
+            roundTrip = end.timeIntervalSince(start)
+        }
+    }
+
+    func start() {
+        guard timer == nil else { return }
+        let timer = Timer(timeInterval: Self.interval, repeats: true) { [weak self] _ in self?.ping() }
+        timer.tolerance = 0.5
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        // Reports the current path at once, which sends the first ping, then again on every change, such as a VPN connecting.
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] _ in self?.networkChanged() }
+        monitor.start(queue: .main)
+        self.monitor = monitor
+    }
+    func stop() {
+        timer?.invalidate(); timer = nil
+        monitor?.cancel(); monitor = nil
+        resetSession(); session = nil
+        reading = PingReading()
+    }
+    /// Old connections may still use the previous route, so start fresh and look again at once.
+    private func networkChanged() {
+        resetSession()
+        session = Self.makeSession()
+        ping()
+    }
+    private func resetSession() {
+        session?.invalidateAndCancel()
+        generation += 1; inFlight = false; detailsIP = nil
+    }
+    private static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        // Generous, because through some VPNs the first TLS handshake alone takes several seconds. Later pings reuse the connection.
+        configuration.timeoutIntervalForRequest = 15
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        return URLSession(configuration: configuration, delegate: nil, delegateQueue: .main)
+    }
+    private func ping() {
+        guard let session, !inFlight else { return }
+        inFlight = true
+        let generation = generation
+        Task { @MainActor [weak self] in
+            let timing = Timing()
+            let started = monotonicSeconds()
+            let reply = try? await session.data(from: Self.trace, delegate: timing)
+            guard let self, generation == self.generation else { return }
+            self.inFlight = false
+            var next = self.reading
+            guard let (data, response) = reply, (response as? HTTPURLResponse)?.statusCode == 200 else {
+                next.latency = nil; next.failed = true
+                next.history.record(PingSample(time: monotonicSeconds(), latency: nil))
+                self.reading = next
+                return
+            }
+            next.latency = timing.roundTrip ?? monotonicSeconds() - started; next.failed = false
+            next.history.record(PingSample(time: monotonicSeconds(), latency: next.latency))
+            if let found = Cloudflare.trace(String(decoding: data, as: UTF8.self)) {
+                next.location = next.location?.updated(by: found) ?? found
+            }
+            self.reading = next
+            if let ip = next.location?.ip, ip != self.detailsIP { self.detailsIP = ip; self.lookUpDetails(session, generation: generation) }
+        }
+    }
+    /// Adds the city and network operator, once per exit address. Best effort: the trace alone gives the country.
+    private func lookUpDetails(_ session: URLSession, generation: Int) {
+        var request = URLRequest(url: Self.meta)
+        // The endpoint answers only requests that come from Cloudflare's speed test page.
+        request.setValue("https://speed.cloudflare.com/", forHTTPHeaderField: "Referer")
+        Task { @MainActor [weak self] in
+            guard let (data, _) = try? await session.data(for: request), let found = Cloudflare.meta(data),
+                  let self, generation == self.generation, self.reading.location?.ip == found.ip else { return }
+            self.reading.location = found
+        }
+    }
+}
+
 struct ActiveInterface: Identifiable {
     let name: String
     let title: String
@@ -70,6 +175,7 @@ final class TrafficModel: ObservableObject {
     @Published var loginMessage: String?
     /// Graph sample under the pointer, if any.
     @Published var hoveredSample: Int?
+    @Published var hoveredPing: Int?
 
     @Published var style = MenuBarStyle(rawValue: UserDefaults.standard.string(forKey: "style") ?? "") ?? .uploadFirst {
         didSet { defaults.set(style.rawValue, forKey: "style"); onLayoutChange?() }
@@ -87,6 +193,14 @@ final class TrafficModel: ObservableObject {
     @Published var showsUsage = UserDefaults.standard.bool(forKey: "showsUsage") {
         didSet { defaults.set(showsUsage, forKey: "showsUsage"); onLayoutChange?() }
     }
+    /// Off by default: with it off, Jarian makes no network requests of its own.
+    @Published var measuresPing = UserDefaults.standard.bool(forKey: "measuresPing") {
+        didSet { defaults.set(measuresPing, forKey: "measuresPing"); updatePinger(); onLayoutChange?() }
+    }
+    @Published var showsPing = UserDefaults.standard.object(forKey: "showsPing") as? Bool ?? true {
+        didSet { defaults.set(showsPing, forKey: "showsPing"); onLayoutChange?() }
+    }
+    @Published private(set) var ping = PingReading()
     /// BSD name of the interface whose speed is shown, or "" for all physical interfaces.
     @Published var interface = UserDefaults.standard.string(forKey: "interface") ?? "" {
         didSet { defaults.set(interface, forKey: "interface"); history.removeAll() }
@@ -109,6 +223,7 @@ final class TrafficModel: ObservableObject {
     private var sampler = TrafficSampler()
     private var names = interfaceDisplayNames()
     private var refreshes = 0
+    private let pinger = Pinger()
 
     init() {
         let today = DailyUsage.key(for: Date())
@@ -121,7 +236,10 @@ final class TrafficModel: ObservableObject {
                             days: UsageHistory.decode(saved.stringArray(forKey: "usageHistory") ?? []), today: today)
         if stored.day != today { past.record(stored, today: today) }
         saveUsage()  // Writes back any days that aged out while Jarian was not running.
+        pinger.onChange = { [weak self] reading in self?.ping = reading; self?.onUpdate?() }
+        updatePinger()
     }
+    private func updatePinger() { if measuresPing { pinger.start() } else { pinger.stop() } }
     /// Yesterday and the longer spans the retention covers, with their totals.
     var recentTotals: [(title: String, total: UInt64)] {
         var rows: [(String, UInt64)] = []
@@ -135,6 +253,13 @@ final class TrafficModel: ObservableObject {
     }
     var menuBarItems: [MenuBarItem] {
         MenuBar.items(rate: rate, usage: showsUsage ? usage.total : nil, style: style, unit: unit, perSecond: showsPerSecond)
+    }
+    /// Flag and country code over the ping, when shown in the menu bar.
+    var menuBarPing: [[String]] { measuresPing && showsPing ? MenuBar.pingColumns(ping, stacked: stacked) : [] }
+    /// "Ping 42 ms · Tbilisi, Georgia", or nil while ping is off.
+    var pingSummary: String? {
+        guard measuresPing else { return nil }
+        return (["Ping \(ping.text)"] + [ping.location?.place()].compactMap { $0 }).joined(separator: " · ")
     }
     var interfaceTitle: String {
         interface.isEmpty ? "All interfaces" : "\(title(for: interface)) (\(interface))"
@@ -282,6 +407,66 @@ struct SpeedGraph: View {
     }
 }
 
+/// Recent pings: the round trip as a line, and a red band wherever a ping got no reply.
+struct PingGraph: View {
+    let samples: [PingSample]
+    let capacity: Int
+    @Binding var hovered: Int?
+    var body: some View {
+        GeometryReader { geometry in graph(geometry.size) }
+            .accessibilityElement()
+            .accessibilityLabel("Ping graph for the last \(samples.count) pings, \(samples.filter { $0.latency == nil }.count) without a reply")
+    }
+    private func graph(_ size: CGSize) -> some View {
+        // Never below 100 ms, so a steady fast connection stays low and flat.
+        let peak = max(samples.compactMap(\.latency).max() ?? 0, 0.1)
+        let step = size.width / CGFloat(max(capacity - 1, 1))
+        let start = CGFloat(capacity - samples.count) * step
+        func x(_ index: Int) -> CGFloat { start + CGFloat(index) * step }
+        func y(_ latency: TimeInterval) -> CGFloat { size.height - 3 - CGFloat(latency / peak) * (size.height - 6) }
+        let green = Color(nsColor: .systemGreen), red = Color(nsColor: .systemRed)
+        return ZStack(alignment: .topLeading) {
+            Path { path in
+                for (index, sample) in samples.enumerated() where sample.latency == nil {
+                    path.addRect(CGRect(x: x(index) - step / 2, y: 0, width: max(step, 2), height: size.height))
+                }
+            }
+            .fill(red.opacity(0.3))
+            Path { $0.move(to: CGPoint(x: 0, y: size.height - 0.5)); $0.addLine(to: CGPoint(x: size.width, y: size.height - 0.5)) }
+                .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+            // The line breaks at each lost ping; a reply between two losses is drawn as a dot.
+            Path { path in
+                var drawing = false
+                for (index, sample) in samples.enumerated() {
+                    guard let latency = sample.latency else { drawing = false; continue }
+                    let point = CGPoint(x: x(index), y: y(latency))
+                    if drawing { path.addLine(to: point) } else { path.move(to: point) }
+                    let next = samples.indices.contains(index + 1) ? samples[index + 1].latency : nil
+                    if !drawing && next == nil { path.addEllipse(in: CGRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2)) }
+                    drawing = true
+                }
+            }
+            .stroke(green, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            if let hovered, samples.indices.contains(hovered) {
+                Path { $0.move(to: CGPoint(x: x(hovered), y: 0)); $0.addLine(to: CGPoint(x: x(hovered), y: size.height)) }
+                    .stroke(Color.secondary.opacity(0.5), lineWidth: 1)
+                if let latency = samples[hovered].latency {
+                    Circle().fill(green).overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
+                        .frame(width: 7, height: 7).position(x: x(hovered), y: y(latency))
+                }
+            }
+        }
+        .contentShape(Rectangle())
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let location):
+                hovered = samples.isEmpty ? nil : min(max(Int(((location.x - start) / step).rounded()), 0), samples.count - 1)
+            case .ended: hovered = nil
+            }
+        }
+    }
+}
+
 struct PopoverView: View {
     @ObservedObject var model: TrafficModel
     let quit: () -> Void
@@ -308,6 +493,15 @@ struct PopoverView: View {
             }
             if let error = model.error {
                 Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+            }
+            if model.measuresPing {
+                Divider()
+                pingRow
+                VStack(alignment: .leading, spacing: 4) {
+                    PingGraph(samples: model.ping.history.samples, capacity: PingHistory.capacity, hovered: $model.hoveredPing)
+                        .frame(height: 40)
+                    Text(pingCaption).font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+                }
             }
             Divider()
             VStack(alignment: .leading, spacing: 6) {
@@ -355,6 +549,14 @@ struct PopoverView: View {
         .frame(width: 340)
         .fixedSize(horizontal: false, vertical: true)
     }
+    private var pingCaption: String {
+        let samples = model.ping.history.samples
+        if let hovered = model.hoveredPing, samples.indices.contains(hovered) {
+            let sample = samples[hovered]
+            return "\(Format.age(monotonicSeconds() - sample.time)) · \(sample.latency.map(Format.ping) ?? "no reply")"
+        }
+        return model.ping.history.summary(interval: Pinger.interval)
+    }
     private var graphCaption: String {
         if let hovered = model.hoveredSample, model.history.indices.contains(hovered) {
             let sample = model.history[hovered]
@@ -363,6 +565,33 @@ struct PopoverView: View {
         }
         let peak = model.history.map(\.received).max() ?? 0
         return "Last \(Int(Double(TrafficModel.historyLength) * model.interval)) s · peak ↓ \(model.speed(peak))"
+    }
+    /// Exit location and ping, laid out like a server row in a VPN client.
+    private var pingRow: some View {
+        let location = model.ping.location
+        let color: Color = switch model.ping.quality {
+        case .good: .green
+        case .fair: .orange
+        case .poor: .red
+        case nil: .secondary
+        }
+        return HStack(spacing: 10) {
+            Text(location?.flag ?? "🌐").font(.system(size: 26)).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(location?.place() ?? (model.ping.failed ? "No reply from Cloudflare" : "Finding location…")).lineLimit(1)
+                if let location {
+                    Text(([location.ip] + [location.organization].compactMap { $0 }).joined(separator: " · "))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
+                }
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(model.ping.text).font(.system(size: 17, weight: .medium, design: .rounded)).monospacedDigit().foregroundStyle(color)
+                Text(location.map { $0.colo.isEmpty ? "Ping" : "Ping · \($0.colo)" } ?? "Ping").font(.caption).foregroundStyle(.secondary)
+                    .help(location?.coloCity.map { "Measured to Cloudflare's data center in \($0)" } ?? "Measured to Cloudflare's nearest data center")
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
     private func reading(_ title: String, _ symbol: String, _ value: Double, _ color: NSColor) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -425,6 +654,15 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Section {
+                Toggle("Measure ping and location", isOn: $model.measuresPing)
+                Toggle("Show location and ping in menu bar", isOn: $model.showsPing).disabled(!model.measuresPing)
+            } header: {
+                Text("Ping")
+            } footer: {
+                Text("Every \(Int(Pinger.interval)) seconds, Jarian times a small HTTPS request to Cloudflare (speed.cloudflare.com). It takes the same route as your other traffic, through any VPN or proxy, so the ping and location are what websites see. When this is off, Jarian makes no network requests.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Section {
                 Toggle("Open at login", isOn: Binding(get: { model.opensAtLogin }, set: { model.setOpensAtLogin($0) }))
                 if let message = model.loginMessage {
                     Text(message).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
@@ -479,32 +717,52 @@ struct MenuBarRenderer {
         let values = samples.map { Format.speed($0, unit: unit, perSecond: perSecond) } + samples.map { Format.amount(UInt64($0 * 1000)) }
         return (["↑", "↓", "⇅", "="].map(width).max() ?? 0, values.map(width).max() ?? 0)
     }
-    /// A template image, so the readings follow the menu bar's light, dark, and tinted styles.
-    func image(_ items: [MenuBarItem]) -> NSImage {
+    /// Widths of the location and ping lines, also sized for the widest values.
+    private var pingWidths: (location: CGFloat, ping: CGFloat) {
+        (width("🇺🇸 WW"), ["timeout", "9999 ms"].map(width).max() ?? 0)
+    }
+    /// The readings, then the ping columns, if any. Without ping this is a template image, so it follows the menu bar's
+    /// light, dark, and tinted styles. A flag needs its colors, so with ping the text is drawn in `textColor` instead.
+    func image(_ items: [MenuBarItem], ping: [[String]] = [], textColor: NSColor = .labelColor) -> NSImage {
         let height = NSStatusBar.system.thickness
         let columns = columns
         let gap: CGFloat = stacked ? 6 : 3, spacing: CGFloat = 7
         let column = columns.symbol + gap + columns.value
         let groups = MenuBar.columns(items, stacked: stacked)
+        let widths = pingWidths
+        // Stacked, location and ping share one column; side by side, the ping comes last.
+        let pingColumnWidths = stacked ? ping.map { $0.count > 1 ? max(widths.location, widths.ping) : widths.ping }
+            : ping.indices.map { $0 == ping.count - 1 ? widths.ping : widths.location }
         let font = font
         let lineHeight = ceil(font.ascender - font.descender)
-        let size = NSSize(width: CGFloat(groups.count) * column + CGFloat(max(groups.count - 1, 0)) * spacing, height: height)
+        let allWidths = Array(repeating: column, count: groups.count) + pingColumnWidths
+        let size = NSSize(width: allWidths.reduce(0, +) + CGFloat(max(allWidths.count - 1, 0)) * spacing, height: height)
+        let color = ping.isEmpty ? NSColor.black : textColor
         let image = NSImage(size: size, flipped: true) { _ in
+            let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+            // A column with one line is centred vertically.
+            func top(_ lines: Int, _ line: Int) -> CGFloat { (height - CGFloat(lines) * lineHeight) / 2 + CGFloat(line) * lineHeight }
             for (index, group) in groups.enumerated() {
                 for (line, entry) in group.enumerated() {
                     let x = CGFloat(index) * (column + spacing)
-                    // A column with one line is centred vertically.
-                    let y = (height - CGFloat(group.count) * lineHeight) / 2 + CGFloat(line) * lineHeight
-                    let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
+                    let y = top(group.count, line)
                     let symbol = NSAttributedString(string: entry.symbol, attributes: attributes)
                     symbol.draw(at: CGPoint(x: x + (columns.symbol - symbol.size().width) / 2, y: y))
                     let value = NSAttributedString(string: entry.value, attributes: attributes)
                     value.draw(at: CGPoint(x: x + column - value.size().width, y: y))  // Right-aligned so digits stay put.
                 }
             }
+            var x = CGFloat(groups.count) * (column + spacing)
+            for (lines, width) in zip(ping, pingColumnWidths) {
+                for (line, text) in lines.enumerated() {
+                    let value = NSAttributedString(string: text, attributes: attributes)
+                    value.draw(at: CGPoint(x: x + width - value.size().width, y: top(lines.count, line)))
+                }
+                x += width + spacing
+            }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = ping.isEmpty
         return image
     }
 }
@@ -516,6 +774,8 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var timer: Timer?
     // Changing the status item while its menu is open can dismiss the menu, so updates wait until it closes.
     private var menuOpen = false
+    /// Redraws the colored ping image when the menu bar turns light or dark.
+    private var appearanceObservation: NSKeyValueObservation?
     func applicationDidFinishLaunching(_ notification: Notification) {
         item.button?.imagePosition = .imageOnly
         item.button?.setAccessibilityLabel("Jarian network speed")
@@ -529,6 +789,9 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.onUpdate = { [weak self] in self?.refreshStatusItem() }
         model.onLayoutChange = { [weak self] in self?.refreshStatusItem() }
         model.onIntervalChange = { [weak self] in self?.startTimer() }
+        appearanceObservation = item.button?.observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.refreshStatusItem() }
+        }
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(self, selector: #selector(save), name: NSWorkspace.willSleepNotification, object: nil)
         startTimer()
@@ -543,8 +806,12 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func refreshStatusItem() {
         guard !menuOpen else { return }
         let items = model.menuBarItems
-        item.button?.image = MenuBarRenderer(model: model).image(items)
+        // The menu bar's own appearance follows the wallpaper, so it can differ from the app's.
+        var textColor = NSColor.labelColor
+        item.button?.effectiveAppearance.performAsCurrentDrawingAppearance { textColor = NSColor.labelColor.usingColorSpace(.sRGB) ?? .labelColor }
+        item.button?.image = MenuBarRenderer(model: model).image(items, ping: model.menuBarPing, textColor: textColor)
         let summary = "Download \(model.speed(model.rate.received)), upload \(model.speed(model.rate.sent)), today \(Format.amount(model.usage.total))"
+            + (model.pingSummary.map { "\n\($0)" } ?? "")
         item.button?.setAccessibilityValue(summary)
         item.button?.toolTip = model.error ?? "Jarian · \(model.interfaceTitle)\n\(summary)"
     }
@@ -562,6 +829,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         info("↓ \(model.speed(model.rate.received))   ↑ \(model.speed(model.rate.sent))")
         info("Today: \(Format.amount(model.usage.total)) (↓ \(Format.amount(model.usage.received)) · ↑ \(Format.amount(model.usage.sent)))")
+        if let ping = model.pingSummary { info(ping) }
         info(model.interfaceTitle)
         menu.addItem(.separator())
         let reset = NSMenuItem(title: "Reset Today's Usage", action: #selector(resetUsage), keyEquivalent: "")
@@ -627,6 +895,15 @@ if CommandLine.arguments.contains("--probe") {
                   + "↓ \(Format.amount(counter.received)) ↑ \(Format.amount(counter.sent))")
         }
     } catch { fputs("\(error)\n", stderr); exit(1) }
+} else if CommandLine.arguments.contains("--ping") {
+    // Prints each change for 30 seconds, then exits. Unchanged readings are not repeated.
+    let pinger = Pinger()
+    pinger.onChange = { reading in
+        let location = reading.location.map { "\($0.flag ?? "") \($0.place()) · \($0.ip) · \($0.organization ?? "—") · via \($0.colo)" }
+        print("\(reading.text)\(location.map { "  \($0)" } ?? "")")
+    }
+    pinger.start()
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 30))
 } else {
     let app = NSApplication.shared
     let delegate = MenuApp()
