@@ -100,6 +100,11 @@ final class Pinger {
             guard self.data.count + data.count <= Pinger.replyLimit else { dataTask.cancel(); return }
             self.data.append(data)
         }
+        /// Redirects are not followed, so requests only ever go to the host chosen in Settings. A redirect counts as no reply.
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
         func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
             guard let last = metrics.transactionMetrics.last, let start = last.requestStartDate,
                   let end = last.responseStartDate else { return }
@@ -195,7 +200,9 @@ final class Pinger {
                 self.reading = next
                 return
             }
-            next.latency = roundTrip ?? monotonicSeconds() - started; next.failed = false
+            // Metrics use the wall clock, which can jump mid-request; the monotonic time since sending bounds them.
+            let elapsed = monotonicSeconds() - started
+            next.latency = roundTrip.flatMap { (0...elapsed).contains($0) ? $0 : nil } ?? elapsed; next.failed = false
             next.history.record(PingSample(time: monotonicSeconds(), latency: next.latency))
             if self.service != .off {
                 if server.reportsAddress, let found = Cloudflare.trace(String(decoding: data, as: UTF8.self)) { self.places.trace(found) }
