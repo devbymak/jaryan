@@ -24,9 +24,10 @@ Requires macOS 13+ and Xcode Command Line Tools.
 
 ```sh
 ./test.sh
-./build.sh
-open Jarian.app
+./build.sh --install   # builds, replaces /Applications/Jarian.app, and opens it
 ```
+
+`./build.sh` alone builds `Jarian.app` here without installing it. Only one copy runs at a time; a second launch quits immediately.
 
 `Jarian.app/Contents/MacOS/jarian --probe` prints each interface's counters and whether it is counted. `--ping` prints ping and location readings for 30 seconds, using the providers chosen in Settings. Override them with `-pingServer google|apple|cloudflare`, `-locationService ipinfo|geojs|ipsb|ifconfig|cloudflare|off`, and `-pingInterval 1|2|5|10|30|60` before `--ping`.
 

@@ -250,7 +250,6 @@ final class TrafficModel: ObservableObject {
     @Published private(set) var past: UsageHistory
     @Published private(set) var active: [ActiveInterface] = []
     @Published private(set) var error: String?
-    @Published var loginMessage: String?
     /// Graph sample under the pointer, if any.
     @Published var hoveredSample: Int?
     @Published var hoveredPing: Int?
@@ -278,7 +277,7 @@ final class TrafficModel: ObservableObject {
     @Published var showsPing = UserDefaults.standard.object(forKey: "showsPing") as? Bool ?? true {
         didSet { defaults.set(showsPing, forKey: "showsPing"); onLayoutChange?() }
     }
-    /// Like Baadgir's heat colours: a slow ping turns yellow, a bad one red.
+    /// Like Baadgir's heat colors: a slow ping turns yellow, a bad one red.
     @Published var colorsPing = UserDefaults.standard.object(forKey: "colorsPing") as? Bool ?? true {
         didSet { defaults.set(colorsPing, forKey: "colorsPing"); onLayoutChange?() }
     }
@@ -350,7 +349,7 @@ final class TrafficModel: ObservableObject {
     }
     /// Flag and country code over the ping, when shown in the menu bar.
     var menuBarPing: [[String]] { measuresPing && showsPing ? MenuBar.pingColumns(ping, stacked: stacked) : [] }
-    /// Colour for the ping's quality, or nil when colours are off or no ping has finished.
+    /// Color for the ping's quality, or nil when colors are off or no ping has finished.
     var pingLevel: PingReading.Quality? { colorsPing ? ping.quality : nil }
     /// "Ping 42 ms · Tbilisi, Georgia", or nil while ping is off.
     var pingSummary: String? {
@@ -408,18 +407,17 @@ final class TrafficModel: ObservableObject {
         defaults.set(past.encoded, forKey: "usageHistory")
     }
 
-    var opensAtLogin: Bool { SMAppService.mainApp.status == .enabled }
-    func setOpensAtLogin(_ enabled: Bool) {
-        loginMessage = nil
+    /// Mirrors the login item's registration; System Settings can change it behind our back.
+    @Published private(set) var loginItemStatus = SMAppService.mainApp.status
+    @Published private(set) var loginItemError: String?
+    func setLaunchAtLogin(_ enabled: Bool) {
         do {
             if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-        } catch { loginMessage = error.localizedDescription }
-        if SMAppService.mainApp.status == .requiresApproval {
-            loginMessage = "Allow Jarian in System Settings → General → Login Items."
-            SMAppService.openSystemSettingsLoginItems()
-        }
-        objectWillChange.send()
+            loginItemError = nil
+        } catch { loginItemError = "Cannot change Launch at Login: \(error.localizedDescription)" }
+        loginItemStatus = SMAppService.mainApp.status
     }
+    func refreshLoginItemStatus() { loginItemStatus = SMAppService.mainApp.status }
 }
 
 extension NSColor {
@@ -432,7 +430,7 @@ extension NSColor {
     }
     static let download = dynamic(light: 0x2a78d6, dark: 0x3987e5)
     static let upload = dynamic(light: 0xeb6834, dark: 0xd95926)
-    /// A good ping keeps the menu bar's own text colour; only a slow or failing one stands out.
+    /// A good ping keeps the menu bar's own text color; only a slow or failing one stands out.
     static func ping(_ quality: PingReading.Quality) -> NSColor? {
         switch quality {
         case .good: return nil
@@ -451,82 +449,6 @@ extension Color {
     }
 }
 
-/// Maps values and ages to points in a graph's plot area. The newest value sits at the right edge.
-struct GraphGeometry {
-    let plot: CGRect
-    let top: Double
-    /// Seconds the plot spans, from its left edge to now.
-    let span: TimeInterval
-    func x(age: TimeInterval) -> CGFloat { plot.maxX - CGFloat(age / span) * plot.width }
-    func y(_ value: Double) -> CGFloat { plot.maxY - CGFloat(min(max(value / top, 0), 1)) * plot.height }
-    /// Index of the sample nearest `x`, for samples `interval` seconds apart with the last one now.
-    func index(at x: CGFloat, count: Int, interval: TimeInterval) -> Int? {
-        guard count > 0 else { return nil }
-        let age = Double((plot.maxX - x) / plot.width) * span
-        return min(max(count - 1 - Int((age / interval).rounded()), 0), count - 1)
-    }
-    func age(_ index: Int, count: Int, interval: TimeInterval) -> TimeInterval { Double(count - 1 - index) * interval }
-}
-
-/// Grid lines with value labels on the right and time labels below, around a plot drawn by `content`.
-struct GraphFrame<Content: View>: View {
-    let scale: GraphScale
-    let span: TimeInterval
-    let label: (Double) -> String
-    @ViewBuilder let content: (GraphGeometry) -> Content
-    /// Shared by every graph so their plot areas line up.
-    static var gutter: CGFloat { 54 }
-    var body: some View {
-        GeometryReader { geometry in
-            let size = geometry.size
-            // Room above for the top label, and below for the time labels.
-            let layout = GraphGeometry(plot: CGRect(x: 0, y: 6, width: max(size.width - Self.gutter, 1), height: max(size.height - 22, 1)),
-                                       top: scale.top, span: span)
-            let plot = layout.plot
-            let times = TimeTick.ticks(span: span)
-            ZStack(alignment: .topLeading) {
-                Path { path in
-                    for tick in scale.ticks.dropFirst() {
-                        path.move(to: CGPoint(x: plot.minX, y: layout.y(tick))); path.addLine(to: CGPoint(x: plot.maxX, y: layout.y(tick)))
-                    }
-                    for tick in times.dropFirst() where tick.age < span {
-                        let x = layout.x(age: tick.age)
-                        path.move(to: CGPoint(x: x, y: plot.minY)); path.addLine(to: CGPoint(x: x, y: plot.maxY))
-                    }
-                }
-                .stroke(Color.secondary.opacity(0.18), style: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
-                Path { $0.move(to: CGPoint(x: plot.minX, y: plot.maxY)); $0.addLine(to: CGPoint(x: plot.maxX, y: plot.maxY)) }
-                    .stroke(Color.secondary.opacity(0.4), lineWidth: 1)
-                content(layout)
-                ForEach(scale.ticks, id: \.self) { tick in
-                    axisText(label(tick)).frame(width: Self.gutter - 6, alignment: .leading)
-                        .position(x: plot.maxX + Self.gutter / 2 + 3, y: layout.y(tick))
-                }
-                ForEach(times, id: \.age) { tick in
-                    // The oldest label lines up with the plot's left edge instead of hanging past it.
-                    let x = layout.x(age: tick.age)
-                    axisText(tick.label).frame(width: 48, alignment: x - 24 < plot.minX ? .leading : .center)
-                        .position(x: max(x, plot.minX + 24), y: plot.maxY + 9)
-                }
-            }
-        }
-    }
-    private func axisText(_ text: String) -> some View {
-        Text(text).font(.system(size: 9.5)).monospacedDigit().foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
-    }
-}
-
-/// Vertical hover line across the plot, at the sample under the pointer.
-private func hoverLine(_ x: CGFloat, in plot: CGRect) -> some View {
-    Path { $0.move(to: CGPoint(x: x, y: plot.minY)); $0.addLine(to: CGPoint(x: x, y: plot.maxY)) }
-        .stroke(Color.secondary.opacity(0.6), lineWidth: 1)
-}
-private func hoverMarker(_ center: CGPoint, _ color: Color) -> some View {
-    Circle().fill(color)
-        .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 2))
-        .frame(width: 8, height: 8).position(center)
-}
-
 /// The last minute of download and upload speed on one shared axis.
 struct SpeedGraph: View {
     let history: [Throughput]
@@ -538,44 +460,32 @@ struct SpeedGraph: View {
         // Scaled in the chosen unit so the ticks are round in it. Never below 10 KB/s so idle noise stays flat.
         let factor: Double = unit == .bits ? 8 : 1
         let peak = history.map { max($0.received, $0.sent) }.max() ?? 0
-        GraphFrame(scale: GraphScale(peak: peak * factor, minimum: 10_000 * factor),
-                   span: Double(capacity) * interval, label: { Format.speedTick($0 / factor, unit: unit) }) { layout in
+        GraphFrame(scale: GraphScale(peak: peak * factor, minimum: 10_000 * factor), span: Double(capacity) * interval,
+                   gutter: PopoverView.graphGutter, label: { Format.speedTick($0 / factor, unit: unit) }) { layout in
             graph(layout, factor: factor)
         }
         .accessibilityElement()
         .accessibilityLabel("Speed graph for the last \(history.count) samples")
     }
-    private func points(_ layout: GraphGeometry, _ value: KeyPath<Throughput, Double>, _ factor: Double) -> [CGPoint] {
-        history.enumerated().map { index, sample in
-            CGPoint(x: layout.x(age: layout.age(index, count: history.count, interval: interval)), y: layout.y(sample[keyPath: value] * factor))
-        }
-    }
     private func graph(_ layout: GraphGeometry, factor: Double) -> some View {
-        let stroke = StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round)
-        let upload = points(layout, \.sent, factor), download = points(layout, \.received, factor)
+        let upload = layout.points(history.map { $0.sent * factor }, interval: interval).compactMap { $0 }
+        let download = layout.points(history.map { $0.received * factor }, interval: interval).compactMap { $0 }
         let plot = layout.plot
         return ZStack(alignment: .topLeading) {
             area(download, plot).fill(LinearGradient(colors: [Color(nsColor: .download).opacity(0.22), Color(nsColor: .download).opacity(0.02)],
                                                      startPoint: .top, endPoint: .bottom))
             area(upload, plot).fill(LinearGradient(colors: [Color(nsColor: .upload).opacity(0.16), Color(nsColor: .upload).opacity(0.02)],
                                                    startPoint: .top, endPoint: .bottom))
-            line(upload).stroke(Color(nsColor: .upload), style: stroke)
-            line(download).stroke(Color(nsColor: .download), style: stroke)
+            graphLine(upload).stroke(Color(nsColor: .upload), style: .graphLine)
+            graphLine(download).stroke(Color(nsColor: .download), style: .graphLine)
             if let hovered, history.indices.contains(hovered) {
                 hoverLine(download[hovered].x, in: plot)
                 hoverMarker(upload[hovered], Color(nsColor: .upload))
                 hoverMarker(download[hovered], Color(nsColor: .download))
             }
         }
-        .contentShape(Rectangle())
-        .onContinuousHover { phase in
-            switch phase {
-            case .active(let location): hovered = layout.index(at: location.x, count: history.count, interval: interval)
-            case .ended: hovered = nil
-            }
-        }
+        .graphHover(layout, count: history.count, interval: interval, hovered: $hovered)
     }
-    private func line(_ points: [CGPoint]) -> Path { Path { $0.addLines(points) } }
     private func area(_ points: [CGPoint], _ plot: CGRect) -> Path {
         Path { path in
             guard let first = points.first, let last = points.last else { return }
@@ -595,8 +505,8 @@ struct PingGraph: View {
     @Binding var hovered: Int?
     var body: some View {
         // Never below 100 ms, so a steady fast connection stays low and flat.
-        GraphFrame(scale: GraphScale(peak: samples.compactMap(\.latency).max() ?? 0, minimum: 0.1),
-                   span: Double(capacity) * interval, label: Format.pingTick) { layout in
+        GraphFrame(scale: GraphScale(peak: samples.compactMap(\.latency).max() ?? 0, minimum: 0.1), span: Double(capacity) * interval,
+                   gutter: PopoverView.graphGutter, label: Format.pingTick) { layout in
             graph(layout)
         }
         .accessibilityElement()
@@ -606,6 +516,7 @@ struct PingGraph: View {
         let plot = layout.plot
         let step = plot.width / CGFloat(capacity)
         func x(_ index: Int) -> CGFloat { layout.x(age: layout.age(index, count: samples.count, interval: interval)) }
+        let points = layout.points(samples.map(\.latency), interval: interval)
         let green = Color(nsColor: .systemGreen), red = Color(nsColor: .systemRed)
         return ZStack(alignment: .topLeading) {
             Path { path in
@@ -614,31 +525,14 @@ struct PingGraph: View {
                 }
             }
             .fill(red.opacity(0.25))
-            // The line breaks at each lost ping; a reply between two losses is drawn as a dot.
-            Path { path in
-                var drawing = false
-                for (index, sample) in samples.enumerated() {
-                    guard let latency = sample.latency else { drawing = false; continue }
-                    let point = CGPoint(x: x(index), y: layout.y(latency))
-                    if drawing { path.addLine(to: point) } else { path.move(to: point) }
-                    let next = samples.indices.contains(index + 1) ? samples[index + 1].latency : nil
-                    if !drawing && next == nil { path.addEllipse(in: CGRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2)) }
-                    drawing = true
-                }
-            }
-            .stroke(green, style: StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round))
+            // The line breaks at each lost ping.
+            graphLine(points).stroke(green, style: .graphLine)
             if let hovered, samples.indices.contains(hovered) {
                 hoverLine(x(hovered), in: plot)
-                if let latency = samples[hovered].latency { hoverMarker(CGPoint(x: x(hovered), y: layout.y(latency)), green) }
+                if let point = points[hovered] { hoverMarker(point, green) }
             }
         }
-        .contentShape(Rectangle())
-        .onContinuousHover { phase in
-            switch phase {
-            case .active(let location): hovered = layout.index(at: location.x, count: samples.count, interval: interval)
-            case .ended: hovered = nil
-            }
-        }
+        .graphHover(layout, count: samples.count, interval: interval, hovered: $hovered)
     }
 }
 
@@ -646,6 +540,8 @@ struct PopoverView: View {
     @ObservedObject var model: TrafficModel
     let quit: () -> Void
     var openSettings: () -> Void = {}
+    /// Shared by both graphs so their plot areas line up.
+    static let graphGutter: CGFloat = 54
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
@@ -731,7 +627,7 @@ struct PopoverView: View {
         let samples = model.ping.history.samples
         if let hovered = model.hoveredPing, samples.indices.contains(hovered) {
             let sample = samples[hovered]
-            return "\(Format.age(monotonicSeconds() - sample.time)) · \(sample.latency.map(Format.ping) ?? "no reply")"
+            return "\(TimeTick.ago(monotonicSeconds() - sample.time)) · \(sample.latency.map(Format.ping) ?? "no reply")"
         }
         return model.ping.history.summary(interval: model.pingInterval)
     }
@@ -774,7 +670,7 @@ struct PopoverView: View {
     private func reading(_ title: String, _ symbol: String, _ value: Double, _ color: NSColor) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
-                RoundedRectangle(cornerRadius: 1).fill(Color(nsColor: color)).frame(width: 10, height: 3)
+                GraphSwatch(color: Color(nsColor: color))
                 Text("\(symbol) \(title)").font(.caption).foregroundStyle(.secondary)
             }
             Text(model.speed(value))
@@ -822,12 +718,22 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
+        .onAppear { model.refreshLoginItemStatus() }
     }
 
     @ViewBuilder private var general: some View {
         Section {
-            Toggle("Launch at login", isOn: Binding(get: { model.opensAtLogin }, set: { model.setOpensAtLogin($0) }))
-            if let message = model.loginMessage { warning(message) }
+            Toggle("Launch at login", isOn: Binding(
+                get: { [.enabled, .requiresApproval].contains(model.loginItemStatus) },
+                set: { model.setLaunchAtLogin($0) }))
+            if model.loginItemStatus == .requiresApproval {
+                HStack {
+                    Text("Allow Jarian in Login Items to finish.").font(.caption).foregroundStyle(.orange)
+                    Spacer()
+                    Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
+                }
+            }
+            if let error = model.loginItemError { warning(error) }
         }
         Section {
             Picker("Interface", selection: $model.interface) {
@@ -1051,7 +957,7 @@ struct MenuBarRenderer {
         let color = ping.isEmpty ? NSColor.black : textColor
         let image = NSImage(size: size, flipped: true) { _ in
             let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
-            // A column with one line is centred vertically.
+            // A column with one line is centered vertically.
             func top(_ lines: Int, _ line: Int) -> CGFloat { (height - CGFloat(lines) * lineHeight) / 2 + CGFloat(line) * lineHeight }
             for (index, group) in groups.enumerated() {
                 for (line, entry) in group.enumerated() {
@@ -1182,6 +1088,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsWindow: NSWindow?
     @objc func openSettings() {
         popover.performClose(nil)
+        model.refreshLoginItemStatus()
         if settingsWindow == nil {
             let tabs = SettingsTabs(model: model)
             let window = NSWindow(contentViewController: tabs)
@@ -1224,6 +1131,10 @@ if CommandLine.arguments.contains("--probe") {
     }
     pinger.start()
     RunLoop.main.run(until: Date(timeIntervalSinceNow: 30))
+} else if NSRunningApplication.runningApplications(withBundleIdentifier: "local.jarian")
+            .contains(where: { $0.processIdentifier != getpid() }) {
+    // Two copies would show two menu bar items and overwrite each other's usage totals.
+    fputs("Jarian is already running.\n", stderr)
 } else {
     let app = NSApplication.shared
     let delegate = MenuApp()

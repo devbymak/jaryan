@@ -1,8 +1,8 @@
 import Foundation
 
 var checks = 0
-func check(_ condition: @autoclosure () -> Bool, _ description: String) {
-    guard condition() else { fatalError("FAILED: \(description)") }
+func check(_ condition: @autoclosure () throws -> Bool, _ description: String) rethrows {
+    guard try condition() else { fatalError("FAILED: \(description)") }
     checks += 1
 }
 func counters(_ values: [String: (UInt64, UInt64)]) -> [InterfaceCounters] {
@@ -228,7 +228,7 @@ check(pings.summary(interval: 5) == "Last 10 min · avg 300 ms · 1 lost", "Hist
 for index in 0..<300 { pings.record(PingSample(time: Double(index), latency: 0.1)) }
 check(pings.samples.count == PingHistory.capacity && pings.lost == 0, "History is bounded and old losses age out")
 check(pings.summary(interval: 5).hasSuffix("no loss"), "No loss")
-check(Format.age(1) == "Now" && Format.age(25) == "25 s ago" && Format.age(120) == "2 min ago" && Format.age(185) == "3 min 5 s ago",
+check(TimeTick.ago(1) == "Now" && TimeTick.ago(25) == "25 s ago" && TimeTick.ago(120) == "2 min ago" && TimeTick.ago(185) == "3 min 5 s ago",
       "Ages")
 
 print("All \(checks) checks passed")

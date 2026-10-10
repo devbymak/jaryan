@@ -10,7 +10,7 @@ done
 mkdir -p .build/module-cache
 jarian_cache_path="$(cd .build/module-cache && pwd -P)"
 xcrun swift -module-cache-path "$jarian_cache_path" sources/icon.swift .build/app-icon.iconset 'Jarian.app/Contents/Resources/app-icon.icns'
-xcrun swiftc -target arm64-apple-macosx13.0 -module-cache-path "$jarian_cache_path" -swift-version 5 -O -framework AppKit -framework SystemConfiguration -framework ServiceManagement -framework Network sources/traffic.swift sources/main.swift -o 'Jarian.app/Contents/MacOS/jarian'
+xcrun swiftc -target arm64-apple-macosx13.0 -module-cache-path "$jarian_cache_path" -swift-version 5 -O -framework AppKit -framework SystemConfiguration -framework ServiceManagement -framework Network sources/traffic.swift sources/graph.swift sources/main.swift -o 'Jarian.app/Contents/MacOS/jarian'
 cat > 'Jarian.app/Contents/Info.plist' <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -51,3 +51,14 @@ timestamp=()
 [[ "$identity" == - ]] || timestamp=(--timestamp)
 codesign --force --sign "$identity" "${timestamp[@]}" --options runtime --entitlements .build/jarian.entitlements 'Jarian.app'
 echo 'Built Jarian.app'
+if [[ "${1:-}" == "--install" ]]; then
+  # Quit the running copy first; it saves today's usage before exiting.
+  osascript -e 'if application id "local.jarian" is running then tell application id "local.jarian" to quit' >/dev/null
+  for _ in {1..50}; do pgrep -qf '/Applications/Jarian.app/Contents/MacOS/jarian$' || break; sleep 0.2; done
+  rm -rf '/Applications/Jarian.app'
+  ditto 'Jarian.app' '/Applications/Jarian.app'
+  # Only the installed copy should handle Launch at Login.
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$PWD/Jarian.app" 2>/dev/null || true  # Fails when it was never registered.
+  open '/Applications/Jarian.app'
+  echo 'Installed and opened /Applications/Jarian.app'
+fi
