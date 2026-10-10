@@ -40,7 +40,7 @@ xcrun notarytool submit Jarian.zip --keychain-profile <profile> --wait
 xcrun stapler staple Jarian.app
 ```
 
-Because of the sandbox, preferences live in `~/Library/Containers/local.jarian`. The first sandboxed launch moves them there from `~/Library/Preferences`, so builds from before the sandbox will start with default settings.
+Because of the sandbox, preferences live in `~/Library/Containers/local.jarian`.
 
 `assets/app-icon.png` is the app icon; `assets/icon-prompt.txt` records its image-generation prompt.
 

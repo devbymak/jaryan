@@ -1,6 +1,8 @@
 #!/bin/zsh
 set -eu
 cd "$(dirname "$0")"
+# Start from an empty bundle so files dropped from the build never linger in it.
+rm -rf 'Jarian.app'
 mkdir -p 'Jarian.app/Contents/MacOS' 'Jarian.app/Contents/Resources' .build/app-icon.iconset
 for size in 16 32 128 256 512; do
   sips -z "$size" "$size" assets/app-icon.png --out ".build/app-icon.iconset/icon_${size}x${size}.png" >/dev/null
@@ -34,14 +36,6 @@ cat > .build/jarian.entitlements <<'PLIST'
 <plist version="1.0"><dict>
 <key>com.apple.security.app-sandbox</key><true/>
 <key>com.apple.security.network.client</key><true/>
-</dict></plist>
-PLIST
-# On the first sandboxed launch, macOS moves preferences saved by earlier, unsandboxed builds into the container.
-cat > 'Jarian.app/Contents/Resources/container-migration.plist' <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>Move</key><array><string>${Library}/Preferences/local.jarian.plist</string></array>
 </dict></plist>
 PLIST
 # Ad-hoc by default, which runs only on this Mac. To share the app, set JARIAN_SIGN_IDENTITY to a Developer ID
