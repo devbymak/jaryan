@@ -1,7 +1,0 @@
-Generated with the built-in image_gen tool.
-
-Use case: logo-brand
-Asset type: minimalist macOS app icon for Jarian, a network traffic and speed meter.
-Primary request: A beautifully simple pair of opposing data-transfer arrows. Exactly TWO shapes: a warm orange upward arrow on the left and an electric blue downward arrow on the right. Each arrow is a single uninterrupted bold shape with a broad shaft and a clean triangular arrowhead, softly rounded corners. The shafts have a very subtle smooth bend toward each other that gives a little personality and flowing movement, but the arrow directions must remain instantly obvious. Equal visual weight, aligned overall heights. Generous clear gap between arrows, no touching or overlaps. A quiet, crisp, modern utility icon.
-Composition: centered pair on a completely flat deep navy #101B32 macOS rounded-square tile. Tile occupies 80 percent of square image, transparent margin outside. Pair occupies 48 percent of canvas width and 46 percent of canvas height; substantial breathing space inside tile. Use orange #F47B42 and blue #3987E5. Flat solid fills, precise geometry, no gradients, no outlines, no shadows, no bevel, no texture, no illumination.
-Constraints: exactly two arrow shapes and one background tile. No speedometer, no gauge, no tick marks, no needle, no Wi-Fi waves, no chart, no nodes, no extra symbols, no text, no letters, no ribbon folds, no decorative flourishes, no mockups, no watermark. True transparent background outside tile. Single finished icon.
