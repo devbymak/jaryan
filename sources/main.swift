@@ -183,6 +183,9 @@ final class Pinger {
         ping()
     }
     // Requests are created at once, on the main queue, where the session is replaced. A request created later could find
+        // By default the user agent names the app and the CFNetwork and Darwin versions, and Accept-Language lists the
+        // user's languages. Send the same bare values for everyone instead, so requests say nothing about who sent them.
+        configuration.httpAdditionalHeaders = ["User-Agent": "Mozilla/5.0", "Accept-Language": "en"]
     // its session already invalidated, which raises an exception.
     private func ping() {
         guard let session, sentAt == nil else { return }
