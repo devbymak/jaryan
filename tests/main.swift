@@ -99,6 +99,10 @@ check(GraphScale(peak: 1_230_000, minimum: 10_000).ticks == [0, 500_000, 1_000_0
 check(GraphScale(peak: 3_000_000, minimum: 10_000).top == 3_000_000, "A peak on a round value is the top")
 check(GraphScale(peak: 0.3, minimum: 0.1).ticks.count == 4 && GraphScale(peak: .infinity, minimum: 0.1).top == 0.1,
       "Ping scale, and invalid input never crashes")
+for scale in [GraphScale(peak: .greatestFiniteMagnitude, minimum: 1), GraphScale(low: -1, high: 1, span: 0, intervals: 1),
+              GraphScale(low: 1, high: 1, span: 0)] {
+    check(scale.top > scale.bottom && scale.step > 0 && scale.ticks.allSatisfy(\.isFinite), "Extreme ranges end with a usable axis")
+}
 for peak in [1.0, 7.3, 42, 99, 101, 777, 12_345, 9_999_999] {
     let scale = GraphScale(peak: peak, minimum: 1)
     check(scale.top >= peak && scale.ticks.count >= 2 && scale.ticks.count <= 4, "Scale for \(peak) fits in 1 to 3 steps")

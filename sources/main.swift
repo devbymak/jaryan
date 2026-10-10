@@ -290,7 +290,7 @@ final class TrafficModel: ObservableObject {
     @Published var showsPing = UserDefaults.standard.object(forKey: "showsPing") as? Bool ?? true {
         didSet { defaults.set(showsPing, forKey: "showsPing"); onLayoutChange?() }
     }
-    /// Like Baadgir's heat colors: a slow ping turns yellow, a bad one red.
+    /// A slow ping turns yellow, a bad one red.
     @Published var colorsPing = UserDefaults.standard.object(forKey: "colorsPing") as? Bool ?? true {
         didSet { defaults.set(colorsPing, forKey: "colorsPing"); onLayoutChange?() }
     }
