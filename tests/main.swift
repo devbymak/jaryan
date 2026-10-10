@@ -11,7 +11,8 @@ func counters(_ values: [String: (UInt64, UInt64)]) -> [InterfaceCounters] {
 
 // Interface filtering
 for name in ["en0", "en7", "pdp_ip0"] { check(Interfaces.isPhysical(name), "\(name) is physical") }
-for name in ["lo0", "utun3", "ipsec0", "bridge0", "awdl0", "llw0", "anpi1", "ap1", "nan0", "gif0", "stf0"] {
+for name in ["lo0", "utun3", "ipsec0", "bridge0", "awdl0", "llw0", "anpi1", "ap1", "nan0", "gif0", "stf0",
+             "vmenet0", "vmnet8", "vnic0", "vboxnet0"] {
     check(!Interfaces.isPhysical(name), "\(name) is virtual and would double-count")
 }
 
@@ -159,6 +160,11 @@ check(Cloudflare.trace("ip=1.2.3.4\nloc=de\ncolo=fra\n") == NetworkLocation(ip: 
 let noisy = located(.ipinfo, #"{"ip":"1.2.3.4","country":"GE","city":"Tbi\u202Elisi\nX","org":"AS1 \#(String(repeating: "x", count: 500))"}"#)
 check(noisy?.city == "TbilisiX" && (noisy?.organization?.count ?? 99) <= 60, "Text loses control characters and is capped")
 check(NetworkLocation.text(" \n ") == nil && NetworkLocation.text("Sofia") == "Sofia", "Blank text is nothing")
+let piled = NetworkLocation.text("A" + String(repeating: "\u{0301}", count: 5000))
+check((piled?.unicodeScalars.count ?? 99) <= 60, "Combining marks piled on one letter are capped too")
+check(NetworkLocation.text("Tbi\u{2028}lisi\u{2029}") == "Tbilisi", "Line and paragraph separators are removed")
+check(NetworkLocation.text("Zu\u{0308}rich") == "Z\u{00FC}rich", "Accents stay, combined with their letters")
+check(NetworkLocation.text(String(repeating: "a", count: 59) + " b") == String(repeating: "a", count: 59), "No trailing space after the cap")
 
 // Combining traced and looked-up locations
 let v4 = NetworkLocation(ip: "104.28.200.67", country: "GE", colo: "SOF")

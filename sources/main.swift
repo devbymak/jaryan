@@ -159,6 +159,9 @@ final class Pinger {
         let configuration = URLSessionConfiguration.ephemeral
         // Generous, because through some VPNs the first TLS handshake alone takes several seconds. Later pings reuse the connection.
         configuration.timeoutIntervalForRequest = 15
+        // The request timeout only covers silence; without this, a server sending a byte now and then could hold a ping
+        // open for the default 7 days, and no new ping would go out.
+        configuration.timeoutIntervalForResource = 30
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
@@ -295,6 +298,7 @@ final class TrafficModel: ObservableObject {
     private let defaults = UserDefaults.standard
     private var sampler = TrafficSampler()
     private var names = interfaceDisplayNames()
+    private var namesReadAt = monotonicSeconds()
     private var refreshes = 0
     private lazy var pinger = Pinger(server: pingServer, service: locationService, interval: pingInterval)
 
@@ -351,7 +355,8 @@ final class TrafficModel: ObservableObject {
         do { counters = try readCounters(); error = nil } catch {
             self.error = "\(error)"; rate = Throughput(); onUpdate?(); return
         }
-        let sample = sampler.sample(counters, at: monotonicSeconds())
+        let now = monotonicSeconds()
+        let sample = sampler.sample(counters, at: now)
         if let finished = usage.add(sample.transfer(where: Interfaces.isPhysical), today: DailyUsage.key(for: Date())) {
             past.record(finished, today: usage.day); saveUsage()
         }
@@ -362,7 +367,8 @@ final class TrafficModel: ObservableObject {
             if history.count > Self.historyLength { history.removeFirst(history.count - Self.historyLength) }
         }
         let shown = counters.filter { $0.isActive && Interfaces.isPhysical($0.name) && ($0.received > 0 || $0.sent > 0) }
-        if shown.contains(where: { names[$0.name] == nil }) { names = interfaceDisplayNames() }
+        // An interface macOS has no name for would otherwise trigger a lookup every second.
+        if shown.contains(where: { names[$0.name] == nil }), now - namesReadAt >= 30 { names = interfaceDisplayNames(); namesReadAt = now }
         active = shown.map { ActiveInterface(name: $0.name, title: title(for: $0.name),
                                              rate: sample.throughput(where: { [name = $0.name] in $0 == name })) }
         refreshes += 1
@@ -739,7 +745,7 @@ struct SettingsView: View {
             } header: {
                 Text("Monitoring")
             } footer: {
-                Text("“All interfaces” adds up Wi-Fi, Ethernet, and other physical links. VPN, bridge, and loopback interfaces are skipped so no traffic is counted twice.")
+                Text("“All interfaces” adds up Wi-Fi, Ethernet, and other physical links. VPN, bridge, loopback, and virtual machine interfaces are skipped so no traffic is counted twice; a virtual machine's internet traffic still counts, on the physical link it uses.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Section {

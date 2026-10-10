@@ -14,9 +14,11 @@ struct InterfaceCounters: Equatable {
 }
 
 enum Interfaces {
-    /// Loopback, tunnel (VPN), bridge, and Apple peer-to-peer (AWDL, Wi-Fi Aware) interfaces. Their traffic is either local
-    /// or also crosses a physical interface, so counting it would count the same bytes twice.
-    static let virtualPrefixes = ["lo", "utun", "ipsec", "ppp", "gif", "stf", "bridge", "awdl", "llw", "anpi", "ap", "nan", "vmenet", "feth"]
+    /// Loopback, tunnel (VPN), bridge, Apple peer-to-peer (AWDL, Wi-Fi Aware), and virtual machine (Apple Virtualization,
+    /// VMware, Parallels, VirtualBox) interfaces. Their traffic is either local or also crosses a physical interface, so
+    /// counting it would count the same bytes twice.
+    static let virtualPrefixes = ["lo", "utun", "ipsec", "ppp", "gif", "stf", "bridge", "awdl", "llw", "anpi", "ap", "nan",
+                                  "vmenet", "vmnet", "vnic", "vboxnet", "feth"]
     static func isPhysical(_ name: String) -> Bool { !virtualPrefixes.contains { name.hasPrefix($0) } }
 }
 
@@ -212,12 +214,15 @@ struct NetworkLocation: Equatable {
         return NetworkLocation(ip: ip, country: code(country, length: 2, allowing: letters.union(CharacterSet(charactersIn: "0123456789"))),
                                city: text(city), organization: text(organization), colo: code(colo, length: 3, allowing: letters))
     }
-    /// Printable text of at most `limit` characters, or nil if nothing is left.
+    /// Text on one line of at most `limit` Unicode scalars, or nil if nothing is left. Counting scalars rather than
+    /// characters stops a pile of combining marks on one letter from slipping past the cap and drawing over the popover.
     static func text(_ value: String?, limit: Int = 60) -> String? {
         guard let value else { return nil }
-        let printable = String(String.UnicodeScalarView(value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return printable.isEmpty ? nil : String(printable.prefix(limit))
+        let hidden = CharacterSet.controlCharacters.union(.newlines)  // Newlines include U+2028 and U+2029 separators.
+        let printable = String(String.UnicodeScalarView(value.precomposedStringWithCanonicalMapping.unicodeScalars.filter { !hidden.contains($0) }))
+            .trimmingCharacters(in: .whitespaces)
+        let capped = String(String.UnicodeScalarView(printable.unicodeScalars.prefix(limit))).trimmingCharacters(in: .whitespaces)
+        return capped.isEmpty ? nil : capped
     }
     /// The flag emoji for `country`, if it is a real region code. Cloudflare uses "XX" for unknown and "T1" for Tor.
     var flag: String? {
