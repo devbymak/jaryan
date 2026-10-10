@@ -63,6 +63,8 @@ final class TrafficModel: ObservableObject {
     @Published private(set) var rate = Throughput()
     @Published private(set) var history: [Throughput] = []
     @Published private(set) var usage: DailyUsage
+    /// Totals for past days, bounded by `retention`. The speed graph (`history`) is never saved.
+    @Published private(set) var past: UsageHistory
     @Published private(set) var active: [ActiveInterface] = []
     @Published private(set) var error: String?
     @Published var loginMessage: String?
@@ -92,6 +94,13 @@ final class TrafficModel: ObservableObject {
     @Published var interval = [1.0, 2, 5].first { $0 == UserDefaults.standard.double(forKey: "interval") } ?? 1 {
         didSet { defaults.set(interval, forKey: "interval"); history.removeAll(); onIntervalChange?() }
     }
+    /// Days of totals to keep, counting today.
+    @Published var retention = UsageHistory.retentionChoices.first { $0 == UserDefaults.standard.integer(forKey: "historyDays") } ?? 30 {
+        didSet {
+            defaults.set(retention, forKey: "historyDays")
+            past.retention = retention; past.trim(today: usage.day); saveUsage()
+        }
+    }
     var onUpdate: (() -> Void)?
     var onLayoutChange: (() -> Void)?
     var onIntervalChange: (() -> Void)?
@@ -107,6 +116,22 @@ final class TrafficModel: ObservableObject {
                                 received: UInt64(max(0, defaults.double(forKey: "usageReceived"))),
                                 sent: UInt64(max(0, defaults.double(forKey: "usageSent"))))
         usage = stored.day == today ? stored : DailyUsage(day: today)
+        let saved = UserDefaults.standard
+        past = UsageHistory(retention: UsageHistory.retentionChoices.first { $0 == saved.integer(forKey: "historyDays") } ?? 30,
+                            days: UsageHistory.decode(saved.stringArray(forKey: "usageHistory") ?? []), today: today)
+        if stored.day != today { past.record(stored, today: today) }
+        saveUsage()  // Writes back any days that aged out while Jarian was not running.
+    }
+    /// Yesterday and the longer spans the retention covers, with their totals.
+    var recentTotals: [(title: String, total: UInt64)] {
+        var rows: [(String, UInt64)] = []
+        if past.retention > 1, let yesterday = DailyUsage.key(usage.day, adding: -1) {
+            rows.append(("Yesterday", past.usage(on: yesterday)?.total ?? 0))
+        }
+        for days in UsageHistory.retentionChoices.dropFirst() where days <= past.retention {
+            rows.append(("Last \(days) days", past.total(lastDays: days, today: usage)))
+        }
+        return rows
     }
     var menuBarItems: [MenuBarItem] {
         MenuBar.items(rate: rate, usage: showsUsage ? usage.total : nil, style: style, unit: unit, perSecond: showsPerSecond)
@@ -128,7 +153,9 @@ final class TrafficModel: ObservableObject {
             self.error = "\(error)"; rate = Throughput(); onUpdate?(); return
         }
         let sample = sampler.sample(counters, at: monotonicSeconds())
-        usage.add(sample.transfer(where: Interfaces.isPhysical), today: DailyUsage.key(for: Date()))
+        if let finished = usage.add(sample.transfer(where: Interfaces.isPhysical), today: DailyUsage.key(for: Date())) {
+            past.record(finished, today: usage.day); saveUsage()
+        }
         let selected = interface
         rate = sample.throughput(where: selected.isEmpty ? Interfaces.isPhysical : { $0 == selected })
         if sample.elapsed != nil {
@@ -147,10 +174,15 @@ final class TrafficModel: ObservableObject {
         usage = DailyUsage(day: DailyUsage.key(for: Date()))
         saveUsage(); onUpdate?()
     }
+    func clearHistory() {
+        past.clear()
+        saveUsage(); onUpdate?()
+    }
     func saveUsage() {
         defaults.set(usage.day, forKey: "usageDay")
         defaults.set(Double(usage.received), forKey: "usageReceived")
         defaults.set(Double(usage.sent), forKey: "usageSent")
+        defaults.set(past.encoded, forKey: "usageHistory")
     }
 
     var opensAtLogin: Bool { SMAppService.mainApp.status == .enabled }
@@ -291,6 +323,14 @@ struct PopoverView: View {
                     Button("Reset", action: model.resetUsage).buttonStyle(.plain).foregroundStyle(.secondary)
                 }
                 .font(.caption).foregroundStyle(.secondary)
+                ForEach(model.recentTotals, id: \.title) { row in
+                    HStack {
+                        Text(row.title)
+                        Spacer()
+                        Text(Format.amount(row.total)).monospacedDigit()
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                }
             }
             if !model.active.isEmpty {
                 Divider()
@@ -401,12 +441,27 @@ struct SettingsView: View {
                 HStack {
                     Text("Today: \(Format.amount(model.usage.total))").monospacedDigit()
                     Spacer()
-                    Button("Reset Usage", action: model.resetUsage)
+                    Button("Reset Today", action: model.resetUsage)
                 }
             } header: {
                 Text("General")
+            }
+            Section {
+                Picker("Keep daily totals for", selection: $model.retention) {
+                    Text("Today only").tag(1)
+                    Text("7 days").tag(7)
+                    Text("30 days").tag(30)
+                    Text("90 days").tag(90)
+                }
+                HStack {
+                    Text("\(model.past.days.count) past \(model.past.days.count == 1 ? "day" : "days") saved").foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Clear History", action: model.clearHistory).disabled(model.past.days.isEmpty)
+                }
+            } header: {
+                Text("History")
             } footer: {
-                Text("Usage counts all physical interfaces while Jarian is running and restarts at midnight. Only today's total is saved; no logs are written.")
+                Text("Saved on disk: one total per day for the days you keep, at most 90, so it never grows over time. The speed graph stays in memory. Usage counts all physical interfaces while Jarian is running. No logs are written.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }

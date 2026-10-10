@@ -41,6 +41,39 @@ usage.add(Transfer(received: 5, sent: 6), today: "2026-10-11")
 check(usage == DailyUsage(day: "2026-10-11", received: 5, sent: 6), "Usage restarts on a new day")
 var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(identifier: "UTC")!
 check(DailyUsage.key(for: Date(timeIntervalSince1970: 1_791_590_400), calendar: calendar) == "2026-10-10", "Day key")
+check(DailyUsage.key("2026-03-01", adding: -1, calendar: calendar) == "2026-02-28", "Day arithmetic crosses months")
+check(DailyUsage.key("2027-01-01", adding: -1, calendar: calendar) == "2026-12-31", "Day arithmetic crosses years")
+check(DailyUsage.key("nonsense", adding: 1) == nil, "Invalid keys are rejected")
+var rolling = DailyUsage(day: "2026-10-10", received: 9, sent: 1)
+check(rolling.add(Transfer(received: 1, sent: 0), today: "2026-10-10") == nil, "No day ends within a day")
+check(rolling.add(Transfer(received: 2, sent: 3), today: "2026-10-11") == DailyUsage(day: "2026-10-10", received: 10, sent: 1),
+      "The finished day is returned at rollover")
+
+// Bounded daily history
+func day(_ key: String, _ total: UInt64) -> DailyUsage { DailyUsage(day: key, received: total, sent: 0) }
+var past = UsageHistory(retention: 7, today: "2026-10-10")
+past.record(day("2026-10-09", 100), today: "2026-10-10")
+past.record(day("2026-10-05", 50), today: "2026-10-10")
+past.record(day("2026-10-09", 1), today: "2026-10-10")
+past.record(day("2026-10-08", 0), today: "2026-10-10")
+check(past.days.map(\.day) == ["2026-10-09", "2026-10-05"] && past.usage(on: "2026-10-09")?.total == 101,
+      "Days are merged, empty days skipped, newest first")
+past.record(day("2026-10-03", 7), today: "2026-10-10")
+check(past.usage(on: "2026-10-03") == nil, "A day older than the retention is never stored")
+let todayUsage = day("2026-10-10", 1000)
+check(past.total(lastDays: 2, today: todayUsage) == 1101 && past.total(lastDays: 7, today: todayUsage) == 1151, "Totals over recent days")
+past.trim(today: "2026-10-15")
+check(past.days.map(\.day) == ["2026-10-09"], "Days age out as time passes")
+past.retention = 1; past.trim(today: "2026-10-15")
+check(past.days.isEmpty, "Today only keeps no past days")
+var many = UsageHistory(retention: 90, today: "2026-12-31")
+for offset in 1...400 { many.record(day(DailyUsage.key("2026-12-31", adding: -offset)!, 1), today: "2026-12-31") }
+check(many.days.count == 89, "History never holds more than the retention, however long it runs")
+check(UsageHistory.decode(many.encoded) == many.days, "Saved history round-trips")
+check(UsageHistory.decode(["2026-10-09 5 6", "garbage", "2026-13-40 1 1", "2026-10-08 x 1"]) == [DailyUsage(day: "2026-10-09", received: 5, sent: 6)],
+      "Corrupt saved entries are dropped")
+check(UsageHistory(retention: 7, days: [day("2026-01-01", 5), day("2026-10-09", 5)], today: "2026-10-10").days.count == 1,
+      "Old saved days are trimmed on load")
 
 // Formatting
 check(Format.speed(0, unit: .bytes) == "0.00 KB/s", "Idle keeps two decimals so the width stays steady")
