@@ -87,6 +87,26 @@ check(Format.speed(1_250_000, unit: .bits) == "10.0 Mb/s", "Bits are bytes × 8"
 check(Format.speed(3e9, unit: .bytes, perSecond: false) == "3.00 GB", "Menu bar drops /s")
 check(Format.speed(.nan, unit: .bytes) == "0.00 KB/s", "Invalid input never crashes")
 check(Format.amount(512) == "512 B" && Format.amount(1_234_000_000) == "1.23 GB", "Amounts")
+check(Format.speedTick(0, unit: .bytes) == "0" && Format.speedTick(500, unit: .bytes) == "500 B/s", "Small axis labels")
+check(Format.speedTick(2_500_000, unit: .bytes) == "2.5 MB/s" && Format.speedTick(1_000_000, unit: .bytes) == "1 MB/s",
+      "Axis labels drop trailing zeros")
+check(Format.speedTick(125_000, unit: .bits) == "1 Mb/s" && Format.speedTick(.nan, unit: .bits) == "0", "Axis labels in bits")
+check(Format.pingTick(0) == "0" && Format.pingTick(0.05) == "50 ms" && Format.pingTick(0.15000000000000002) == "150 ms", "Ping axis labels")
+
+// Graph axes
+check(GraphScale(peak: 0, minimum: 10_000).ticks == [0, 5_000, 10_000], "An idle graph keeps its minimum scale")
+check(GraphScale(peak: 1_230_000, minimum: 10_000).ticks == [0, 500_000, 1_000_000, 1_500_000], "Round steps above the peak")
+check(GraphScale(peak: 3_000_000, minimum: 10_000).top == 3_000_000, "A peak on a round value is the top")
+check(GraphScale(peak: 0.3, minimum: 0.1).ticks.count == 4 && GraphScale(peak: .infinity, minimum: 0.1).top == 0.1,
+      "Ping scale, and invalid input never crashes")
+for peak in [1.0, 7.3, 42, 99, 101, 777, 12_345, 9_999_999] {
+    let scale = GraphScale(peak: peak, minimum: 1)
+    check(scale.top >= peak && scale.ticks.count >= 2 && scale.ticks.count <= 4, "Scale for \(peak) fits in 1 to 3 steps")
+}
+check(TimeTick.ticks(span: 60).map(\.label) == ["Now", "15 s", "30 s", "45 s", "60 s"], "One-minute axis")
+check(TimeTick.ticks(span: 120).map(\.label) == ["Now", "30 s", "60 s", "90 s", "120 s"], "Two-minute axis")
+check(TimeTick.ticks(span: 600).map(\.label) == ["Now", "2 min", "4 min", "6 min", "8 min", "10 min"], "Ten-minute axis")
+check(TimeTick.ticks(span: 7200).count == 5 && TimeTick.ticks(span: 7200).last?.label == "120 min", "Two-hour axis")
 
 // Menu bar text
 let rate = Throughput(received: 2_000_000, sent: 30_000)

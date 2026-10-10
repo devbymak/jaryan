@@ -186,6 +186,54 @@ enum Format {
     static func ping(_ seconds: TimeInterval) -> String {
         "\(max(1, Int((seconds.isFinite ? seconds : 0) * 1000 + 0.5))) ms"
     }
+    /// Graph axis label for a round speed: "0", "500 KB/s", "2.5 Mb/s". Unlike `speed`, it drops trailing zeros.
+    static func speedTick(_ bytesPerSecond: Double, unit: SpeedUnit) -> String {
+        var value = max(0, bytesPerSecond.isFinite ? bytesPerSecond : 0) * (unit == .bits ? 8 : 1)
+        guard value >= 0.5 else { return "0" }
+        var index = 0
+        while value >= 999.5 && index < prefixes.count { value /= 1000; index += 1 }
+        let prefix = index == 0 ? "" : prefixes[index - 1]
+        return String(format: "%g", (value * 100).rounded() / 100) + " " + prefix + (unit == .bits ? "b" : "B") + "/s"
+    }
+    /// Graph axis label for a round ping: "0", "50 ms".
+    static func pingTick(_ seconds: TimeInterval) -> String {
+        let milliseconds = Int((max(0, seconds.isFinite ? seconds : 0) * 1000).rounded())
+        return milliseconds == 0 ? "0" : "\(milliseconds) ms"
+    }
+}
+
+/// A graph's value axis: from zero up to a round number, in equal round steps.
+struct GraphScale: Equatable {
+    /// Highest value on the axis, and its top tick.
+    let top: Double
+    let step: Double
+    /// The smallest step of 1, 2, 2.5, or 5 × 10ⁿ that fits `peak` in at most `intervals` steps.
+    /// `minimum` keeps idle noise near the bottom instead of filling the graph.
+    init(peak: Double, minimum: Double, intervals: Int = 3) {
+        let peak = max(peak.isFinite ? peak : 0, minimum, .leastNormalMagnitude)
+        let raw = peak / Double(max(intervals, 1))
+        let magnitude = pow(10, floor(log10(raw)))
+        // The tolerance stops float error from skipping a step that fits exactly.
+        step = [1, 2, 2.5, 5, 10].map { $0 * magnitude }.first { $0 >= raw * (1 - 1e-9) } ?? 10 * magnitude
+        top = max(ceil(peak / step - 1e-9), 1) * step
+    }
+    var ticks: [Double] { (0...Int((top / step).rounded())).map { Double($0) * step } }
+}
+
+/// A label on a graph's time axis, `age` seconds before now.
+struct TimeTick: Equatable {
+    let age: TimeInterval
+    let label: String
+    /// Ticks on a round step for a graph that ends now and starts `span` seconds ago, at most six of them.
+    static func ticks(span: TimeInterval) -> [TimeTick] {
+        let span = max(span.isFinite ? span : 0, 1)
+        let steps: [TimeInterval] = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400]
+        let step = steps.first { span / $0 <= 5 + 1e-9 } ?? (span / 5).rounded(.up)
+        return stride(from: 0, through: span + 1e-9, by: step).map { age in
+            let whole = Int(age.rounded())
+            return TimeTick(age: age, label: whole == 0 ? "Now" : step < 60 ? "\(whole) s" : "\(whole / 60) min")
+        }
+    }
 }
 
 /// Where Cloudflare sees the connection coming from: the exit of any VPN or proxy in use.

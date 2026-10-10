@@ -271,6 +271,10 @@ final class TrafficModel: ObservableObject {
     @Published var showsPing = UserDefaults.standard.object(forKey: "showsPing") as? Bool ?? true {
         didSet { defaults.set(showsPing, forKey: "showsPing"); onLayoutChange?() }
     }
+    /// Like Baadgir's heat colours: a slow ping turns yellow, a bad one red.
+    @Published var colorsPing = UserDefaults.standard.object(forKey: "colorsPing") as? Bool ?? true {
+        didSet { defaults.set(colorsPing, forKey: "colorsPing"); onLayoutChange?() }
+    }
     @Published var pingServer = PingServer(rawValue: UserDefaults.standard.string(forKey: "pingServer") ?? "") ?? .cloudflare {
         didSet { defaults.set(pingServer.rawValue, forKey: "pingServer"); pinger.use(pingServer, locationService) }
     }
@@ -339,6 +343,8 @@ final class TrafficModel: ObservableObject {
     }
     /// Flag and country code over the ping, when shown in the menu bar.
     var menuBarPing: [[String]] { measuresPing && showsPing ? MenuBar.pingColumns(ping, stacked: stacked) : [] }
+    /// Colour for the ping's quality, or nil when colours are off or no ping has finished.
+    var pingLevel: PingReading.Quality? { colorsPing ? ping.quality : nil }
     /// "Ping 42 ms · Tbilisi, Georgia", or nil while ping is off.
     var pingSummary: String? {
         guard measuresPing else { return nil }
@@ -419,76 +425,158 @@ extension NSColor {
     }
     static let download = dynamic(light: 0x2a78d6, dark: 0x3987e5)
     static let upload = dynamic(light: 0xeb6834, dark: 0xd95926)
+    /// A good ping keeps the menu bar's own text colour; only a slow or failing one stands out.
+    static func ping(_ quality: PingReading.Quality) -> NSColor? {
+        switch quality {
+        case .good: return nil
+        case .fair: return .systemYellow
+        case .poor: return .systemRed
+        }
+    }
+}
+extension Color {
+    init(_ quality: PingReading.Quality) {
+        switch quality {
+        case .good: self = .green
+        case .fair: self = .yellow
+        case .poor: self = .red
+        }
+    }
 }
 
-/// Maps graph samples to points in a view of a given size.
-struct GraphLayout {
-    let history: [Throughput]
-    let capacity: Int
-    let size: CGSize
-    /// Highest value on the shared axis, never below 10 KB/s so idle noise stays flat.
-    var peak: Double { max(history.map { max($0.received, $0.sent) }.max() ?? 0, 10_000) }
-    var step: CGFloat { size.width / CGFloat(max(capacity - 1, 1)) }
-    /// Newest sample sits at the right edge; a partial history starts part-way across.
-    var start: CGFloat { CGFloat(capacity - history.count) * step }
-    func point(_ index: Int, _ value: Double) -> CGPoint {
-        CGPoint(x: start + CGFloat(index) * step, y: size.height - 3 - CGFloat(value / peak) * (size.height - 6))
+/// Maps values and ages to points in a graph's plot area. The newest value sits at the right edge.
+struct GraphGeometry {
+    let plot: CGRect
+    let top: Double
+    /// Seconds the plot spans, from its left edge to now.
+    let span: TimeInterval
+    func x(age: TimeInterval) -> CGFloat { plot.maxX - CGFloat(age / span) * plot.width }
+    func y(_ value: Double) -> CGFloat { plot.maxY - CGFloat(min(max(value / top, 0), 1)) * plot.height }
+    /// Index of the sample nearest `x`, for samples `interval` seconds apart with the last one now.
+    func index(at x: CGFloat, count: Int, interval: TimeInterval) -> Int? {
+        guard count > 0 else { return nil }
+        let age = Double((plot.maxX - x) / plot.width) * span
+        return min(max(count - 1 - Int((age / interval).rounded()), 0), count - 1)
     }
-    func line(_ value: KeyPath<Throughput, Double>) -> Path {
-        Path { path in
-            for (index, sample) in history.enumerated() {
-                let next = point(index, sample[keyPath: value])
-                if index == 0 { path.move(to: next) } else { path.addLine(to: next) }
+    func age(_ index: Int, count: Int, interval: TimeInterval) -> TimeInterval { Double(count - 1 - index) * interval }
+}
+
+/// Grid lines with value labels on the right and time labels below, around a plot drawn by `content`.
+struct GraphFrame<Content: View>: View {
+    let scale: GraphScale
+    let span: TimeInterval
+    let label: (Double) -> String
+    @ViewBuilder let content: (GraphGeometry) -> Content
+    /// Shared by every graph so their plot areas line up.
+    static var gutter: CGFloat { 54 }
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            // Room above for the top label, and below for the time labels.
+            let layout = GraphGeometry(plot: CGRect(x: 0, y: 6, width: max(size.width - Self.gutter, 1), height: max(size.height - 22, 1)),
+                                       top: scale.top, span: span)
+            let plot = layout.plot
+            let times = TimeTick.ticks(span: span)
+            ZStack(alignment: .topLeading) {
+                Path { path in
+                    for tick in scale.ticks.dropFirst() {
+                        path.move(to: CGPoint(x: plot.minX, y: layout.y(tick))); path.addLine(to: CGPoint(x: plot.maxX, y: layout.y(tick)))
+                    }
+                    for tick in times.dropFirst() where tick.age < span {
+                        let x = layout.x(age: tick.age)
+                        path.move(to: CGPoint(x: x, y: plot.minY)); path.addLine(to: CGPoint(x: x, y: plot.maxY))
+                    }
+                }
+                .stroke(Color.secondary.opacity(0.18), style: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
+                Path { $0.move(to: CGPoint(x: plot.minX, y: plot.maxY)); $0.addLine(to: CGPoint(x: plot.maxX, y: plot.maxY)) }
+                    .stroke(Color.secondary.opacity(0.4), lineWidth: 1)
+                content(layout)
+                ForEach(scale.ticks, id: \.self) { tick in
+                    axisText(label(tick)).frame(width: Self.gutter - 6, alignment: .leading)
+                        .position(x: plot.maxX + Self.gutter / 2 + 3, y: layout.y(tick))
+                }
+                ForEach(times, id: \.age) { tick in
+                    // The oldest label lines up with the plot's left edge instead of hanging past it.
+                    let x = layout.x(age: tick.age)
+                    axisText(tick.label).frame(width: 48, alignment: x - 24 < plot.minX ? .leading : .center)
+                        .position(x: max(x, plot.minX + 24), y: plot.maxY + 9)
+                }
             }
         }
     }
-    func index(at x: CGFloat) -> Int? {
-        history.isEmpty ? nil : min(max(Int(((x - start) / step).rounded()), 0), history.count - 1)
+    private func axisText(_ text: String) -> some View {
+        Text(text).font(.system(size: 9.5)).monospacedDigit().foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
     }
+}
+
+/// Vertical hover line across the plot, at the sample under the pointer.
+private func hoverLine(_ x: CGFloat, in plot: CGRect) -> some View {
+    Path { $0.move(to: CGPoint(x: x, y: plot.minY)); $0.addLine(to: CGPoint(x: x, y: plot.maxY)) }
+        .stroke(Color.secondary.opacity(0.6), lineWidth: 1)
+}
+private func hoverMarker(_ center: CGPoint, _ color: Color) -> some View {
+    Circle().fill(color)
+        .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 2))
+        .frame(width: 8, height: 8).position(center)
 }
 
 /// The last minute of download and upload speed on one shared axis.
 struct SpeedGraph: View {
     let history: [Throughput]
     let capacity: Int
+    let interval: TimeInterval
+    let unit: SpeedUnit
     @Binding var hovered: Int?
     var body: some View {
-        GeometryReader { geometry in
-            graph(GraphLayout(history: history, capacity: capacity, size: geometry.size))
+        // Scaled in the chosen unit so the ticks are round in it. Never below 10 KB/s so idle noise stays flat.
+        let factor: Double = unit == .bits ? 8 : 1
+        let peak = history.map { max($0.received, $0.sent) }.max() ?? 0
+        GraphFrame(scale: GraphScale(peak: peak * factor, minimum: 10_000 * factor),
+                   span: Double(capacity) * interval, label: { Format.speedTick($0 / factor, unit: unit) }) { layout in
+            graph(layout, factor: factor)
         }
         .accessibilityElement()
         .accessibilityLabel("Speed graph for the last \(history.count) samples")
     }
-    private func graph(_ layout: GraphLayout) -> some View {
-        let size = layout.size
-        let stroke = StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)
+    private func points(_ layout: GraphGeometry, _ value: KeyPath<Throughput, Double>, _ factor: Double) -> [CGPoint] {
+        history.enumerated().map { index, sample in
+            CGPoint(x: layout.x(age: layout.age(index, count: history.count, interval: interval)), y: layout.y(sample[keyPath: value] * factor))
+        }
+    }
+    private func graph(_ layout: GraphGeometry, factor: Double) -> some View {
+        let stroke = StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round)
+        let upload = points(layout, \.sent, factor), download = points(layout, \.received, factor)
+        let plot = layout.plot
         return ZStack(alignment: .topLeading) {
-            Path { $0.move(to: CGPoint(x: 0, y: size.height - 0.5)); $0.addLine(to: CGPoint(x: size.width, y: size.height - 0.5)) }
-                .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
-            layout.line(\.sent).stroke(Color(nsColor: .upload), style: stroke)
-            layout.line(\.received).stroke(Color(nsColor: .download), style: stroke)
+            area(download, plot).fill(LinearGradient(colors: [Color(nsColor: .download).opacity(0.22), Color(nsColor: .download).opacity(0.02)],
+                                                     startPoint: .top, endPoint: .bottom))
+            area(upload, plot).fill(LinearGradient(colors: [Color(nsColor: .upload).opacity(0.16), Color(nsColor: .upload).opacity(0.02)],
+                                                   startPoint: .top, endPoint: .bottom))
+            line(upload).stroke(Color(nsColor: .upload), style: stroke)
+            line(download).stroke(Color(nsColor: .download), style: stroke)
             if let hovered, history.indices.contains(hovered) {
-                Path { path in
-                    let x = layout.point(hovered, 0).x
-                    path.move(to: CGPoint(x: x, y: 0)); path.addLine(to: CGPoint(x: x, y: size.height))
-                }
-                .stroke(Color.secondary.opacity(0.5), lineWidth: 1)
-                marker(layout.point(hovered, history[hovered].sent), .upload)
-                marker(layout.point(hovered, history[hovered].received), .download)
+                hoverLine(download[hovered].x, in: plot)
+                hoverMarker(upload[hovered], Color(nsColor: .upload))
+                hoverMarker(download[hovered], Color(nsColor: .download))
             }
         }
         .contentShape(Rectangle())
         .onContinuousHover { phase in
             switch phase {
-            case .active(let location): hovered = layout.index(at: location.x)
+            case .active(let location): hovered = layout.index(at: location.x, count: history.count, interval: interval)
             case .ended: hovered = nil
             }
         }
     }
-    private func marker(_ center: CGPoint, _ color: NSColor) -> some View {
-        Circle().fill(Color(nsColor: color))
-            .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
-            .frame(width: 7, height: 7).position(center)
+    private func line(_ points: [CGPoint]) -> Path { Path { $0.addLines(points) } }
+    private func area(_ points: [CGPoint], _ plot: CGRect) -> Path {
+        Path { path in
+            guard let first = points.first, let last = points.last else { return }
+            path.move(to: CGPoint(x: first.x, y: plot.maxY))
+            for point in points { path.addLine(to: point) }  // `addLines` would start a new subpath.
+            path.addLine(to: CGPoint(x: last.x, y: plot.maxY))
+            path.closeSubpath()
+        }
     }
 }
 
@@ -496,56 +584,51 @@ struct SpeedGraph: View {
 struct PingGraph: View {
     let samples: [PingSample]
     let capacity: Int
+    let interval: TimeInterval
     @Binding var hovered: Int?
     var body: some View {
-        GeometryReader { geometry in graph(geometry.size) }
-            .accessibilityElement()
-            .accessibilityLabel("Ping graph for the last \(samples.count) pings, \(samples.filter { $0.latency == nil }.count) without a reply")
-    }
-    private func graph(_ size: CGSize) -> some View {
         // Never below 100 ms, so a steady fast connection stays low and flat.
-        let peak = max(samples.compactMap(\.latency).max() ?? 0, 0.1)
-        let step = size.width / CGFloat(max(capacity - 1, 1))
-        let start = CGFloat(capacity - samples.count) * step
-        func x(_ index: Int) -> CGFloat { start + CGFloat(index) * step }
-        func y(_ latency: TimeInterval) -> CGFloat { size.height - 3 - CGFloat(latency / peak) * (size.height - 6) }
+        GraphFrame(scale: GraphScale(peak: samples.compactMap(\.latency).max() ?? 0, minimum: 0.1),
+                   span: Double(capacity) * interval, label: Format.pingTick) { layout in
+            graph(layout)
+        }
+        .accessibilityElement()
+        .accessibilityLabel("Ping graph for the last \(samples.count) pings, \(samples.filter { $0.latency == nil }.count) without a reply")
+    }
+    private func graph(_ layout: GraphGeometry) -> some View {
+        let plot = layout.plot
+        let step = plot.width / CGFloat(capacity)
+        func x(_ index: Int) -> CGFloat { layout.x(age: layout.age(index, count: samples.count, interval: interval)) }
         let green = Color(nsColor: .systemGreen), red = Color(nsColor: .systemRed)
         return ZStack(alignment: .topLeading) {
             Path { path in
                 for (index, sample) in samples.enumerated() where sample.latency == nil {
-                    path.addRect(CGRect(x: x(index) - step / 2, y: 0, width: max(step, 2), height: size.height))
+                    path.addRect(CGRect(x: x(index) - step / 2, y: plot.minY, width: max(step, 2), height: plot.height))
                 }
             }
-            .fill(red.opacity(0.3))
-            Path { $0.move(to: CGPoint(x: 0, y: size.height - 0.5)); $0.addLine(to: CGPoint(x: size.width, y: size.height - 0.5)) }
-                .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+            .fill(red.opacity(0.25))
             // The line breaks at each lost ping; a reply between two losses is drawn as a dot.
             Path { path in
                 var drawing = false
                 for (index, sample) in samples.enumerated() {
                     guard let latency = sample.latency else { drawing = false; continue }
-                    let point = CGPoint(x: x(index), y: y(latency))
+                    let point = CGPoint(x: x(index), y: layout.y(latency))
                     if drawing { path.addLine(to: point) } else { path.move(to: point) }
                     let next = samples.indices.contains(index + 1) ? samples[index + 1].latency : nil
                     if !drawing && next == nil { path.addEllipse(in: CGRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2)) }
                     drawing = true
                 }
             }
-            .stroke(green, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            .stroke(green, style: StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round))
             if let hovered, samples.indices.contains(hovered) {
-                Path { $0.move(to: CGPoint(x: x(hovered), y: 0)); $0.addLine(to: CGPoint(x: x(hovered), y: size.height)) }
-                    .stroke(Color.secondary.opacity(0.5), lineWidth: 1)
-                if let latency = samples[hovered].latency {
-                    Circle().fill(green).overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
-                        .frame(width: 7, height: 7).position(x: x(hovered), y: y(latency))
-                }
+                hoverLine(x(hovered), in: plot)
+                if let latency = samples[hovered].latency { hoverMarker(CGPoint(x: x(hovered), y: layout.y(latency)), green) }
             }
         }
         .contentShape(Rectangle())
         .onContinuousHover { phase in
             switch phase {
-            case .active(let location):
-                hovered = samples.isEmpty ? nil : min(max(Int(((location.x - start) / step).rounded()), 0), samples.count - 1)
+            case .active(let location): hovered = layout.index(at: location.x, count: samples.count, interval: interval)
             case .ended: hovered = nil
             }
         }
@@ -572,8 +655,10 @@ struct PopoverView: View {
                 reading("Download", "↓", model.rate.received, .download)
                 reading("Upload", "↑", model.rate.sent, .upload)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                SpeedGraph(history: model.history, capacity: TrafficModel.historyLength, hovered: $model.hoveredSample).frame(height: 56)
+            VStack(alignment: .leading, spacing: 6) {
+                SpeedGraph(history: model.history, capacity: TrafficModel.historyLength, interval: model.interval, unit: model.unit,
+                           hovered: $model.hoveredSample)
+                    .frame(height: 132)
                 Text(graphCaption).font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
             }
             if let error = model.error {
@@ -582,9 +667,10 @@ struct PopoverView: View {
             if model.measuresPing {
                 Divider()
                 pingRow
-                VStack(alignment: .leading, spacing: 4) {
-                    PingGraph(samples: model.ping.history.samples, capacity: PingHistory.capacity, hovered: $model.hoveredPing)
-                        .frame(height: 40)
+                VStack(alignment: .leading, spacing: 6) {
+                    PingGraph(samples: model.ping.history.samples, capacity: PingHistory.capacity, interval: model.pingInterval,
+                              hovered: $model.hoveredPing)
+                        .frame(height: 96)
                     Text(pingCaption).font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
                 }
             }
@@ -631,7 +717,7 @@ struct PopoverView: View {
             }
         }
         .padding(16)
-        .frame(width: 340)
+        .frame(width: 380)
         .fixedSize(horizontal: false, vertical: true)
     }
     private var pingCaption: String {
@@ -654,12 +740,7 @@ struct PopoverView: View {
     /// Exit location and ping, laid out like a server row in a VPN client.
     private var pingRow: some View {
         let location = model.ping.location
-        let color: Color = switch model.ping.quality {
-        case .good: .green
-        case .fair: .orange
-        case .poor: .red
-        case nil: .secondary
-        }
+        let color = model.pingLevel.map(Color.init) ?? (model.ping.quality == nil ? .secondary : .primary)
         return HStack(spacing: 10) {
             Text(location?.flag ?? "🌐").font(.system(size: 26)).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
@@ -708,6 +789,7 @@ struct SettingsView: View {
             let when = server.reportsAddress ? "when your address changes" : "every minute and when the network changes"
             text += " Location comes from \(host), looked up \(when)."
         }
+        if model.colorsPing { text += " Ping turns yellow from 150 ms, and red from 400 ms or when there is no reply." }
         return text + " Requests take the same route as your other traffic, through any VPN or proxy, so they show what websites see. When ping is off, Jarian makes no network requests."
     }
     var body: some View {
@@ -772,6 +854,7 @@ struct SettingsView: View {
                 }
                 .disabled(!model.measuresPing)
                 Toggle("Show location and ping in menu bar", isOn: $model.showsPing).disabled(!model.measuresPing)
+                Toggle("Color ping by speed", isOn: $model.colorsPing).disabled(!model.measuresPing)
             } header: {
                 Text("Ping")
             } footer: {
@@ -839,7 +922,8 @@ struct MenuBarRenderer {
     }
     /// The readings, then the ping columns, if any. Without ping this is a template image, so it follows the menu bar's
     /// light, dark, and tinted styles. A flag needs its colors, so with ping the text is drawn in `textColor` instead.
-    func image(_ items: [MenuBarItem], ping: [[String]] = [], textColor: NSColor = .labelColor) -> NSImage {
+    /// `pingColor` tints the ping itself, the last line of the last ping column.
+    func image(_ items: [MenuBarItem], ping: [[String]] = [], textColor: NSColor = .labelColor, pingColor: NSColor? = nil) -> NSImage {
         let height = NSStatusBar.system.thickness
         let columns = columns
         let gap: CGFloat = stacked ? 6 : 3, spacing: CGFloat = 7
@@ -869,8 +953,10 @@ struct MenuBarRenderer {
                 }
             }
             var x = CGFloat(groups.count) * (column + spacing)
-            for (lines, width) in zip(ping, pingColumnWidths) {
+            for (column, (lines, width)) in zip(ping, pingColumnWidths).enumerated() {
                 for (line, text) in lines.enumerated() {
+                    var attributes = attributes
+                    if let pingColor, column == ping.count - 1, line == lines.count - 1 { attributes[.foregroundColor] = pingColor }
                     let value = NSAttributedString(string: text, attributes: attributes)
                     value.draw(at: CGPoint(x: x + width - value.size().width, y: top(lines.count, line)))
                 }
@@ -925,7 +1011,8 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The menu bar's own appearance follows the wallpaper, so it can differ from the app's.
         var textColor = NSColor.labelColor
         item.button?.effectiveAppearance.performAsCurrentDrawingAppearance { textColor = NSColor.labelColor.usingColorSpace(.sRGB) ?? .labelColor }
-        item.button?.image = MenuBarRenderer(model: model).image(items, ping: model.menuBarPing, textColor: textColor)
+        item.button?.image = MenuBarRenderer(model: model).image(items, ping: model.menuBarPing, textColor: textColor,
+                                                                 pingColor: model.pingLevel.flatMap(NSColor.ping))
         let summary = "Download \(model.speed(model.rate.received)), upload \(model.speed(model.rate.sent)), today \(Format.amount(model.usage.total))"
             + (model.pingSummary.map { "\n\($0)" } ?? "")
         item.button?.setAccessibilityValue(summary)
