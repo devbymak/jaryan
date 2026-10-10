@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="assets/app-icon.png" width="112" alt="Jarian app icon">
-
 # Jarian: network speed monitor for the Mac menu bar
 
 **See your upload and download speed, data usage, and ping at a glance. Free, open source, and private.**
@@ -14,7 +12,7 @@
 </div>
 
 <p align="center">
-  <img src="assets/screenshot.png" width="720" alt="Jarian in the macOS menu bar on a MacBook, showing live upload and download speed and ping, with its popover open: speed and ping graphs, today's data usage, and per-interface speeds">
+  <img src="assets/cover.png" alt="Jarian on a Mac: live upload and download speed and ping in the menu bar, the popover with speed and ping graphs and daily data usage, and the Settings window for menu bar layout, units, and ping, next to a list of features">
 </p>
 
 **Jarian** (جریان, Persian for "flow") is a small, native macOS menu bar app that shows your **internet speed** in real time. It's a Mac take on the popular GNOME *Internet Speed Monitor* extension. It shows what you'd want to know about your connection, and it doesn't watch you.
@@ -65,7 +63,7 @@ xcrun notarytool submit Jarian.zip --keychain-profile <profile> --wait
 xcrun stapler staple Jarian.app
 ```
 
-`assets/icon-prompt.txt` has the prompt used to generate the app icon. The screenshot uses demo data.
+`assets/app-icon.swift` draws the app icon; run `xcrun swift assets/app-icon.swift assets/app-icon.png` to regenerate it. The screenshot uses demo data.
 
 </details>
 
