@@ -27,5 +27,22 @@ cat > 'Jarian.app/Contents/Info.plist' <<'PLIST'
 <key>LSUIElement</key><true/>
 </dict></plist>
 PLIST
-codesign --force --sign - 'Jarian.app'
+# App Sandbox with outgoing connections only: no file access outside its own container, no incoming connections.
+cat > .build/jarian.entitlements <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.security.app-sandbox</key><true/>
+<key>com.apple.security.network.client</key><true/>
+</dict></plist>
+PLIST
+# On the first sandboxed launch, macOS moves preferences saved by earlier, unsandboxed builds into the container.
+cat > 'Jarian.app/Contents/Resources/container-migration.plist' <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Move</key><array><string>${Library}/Preferences/local.jarian.plist</string></array>
+</dict></plist>
+PLIST
+codesign --force --sign - --options runtime --entitlements .build/jarian.entitlements 'Jarian.app'
 echo 'Built Jarian.app'

@@ -108,30 +108,21 @@ check(MenuBar.columns(MenuBar.items(rate: rate, usage: nil, style: .combined, un
 // Ping and location
 check(Format.ping(0.0424) == "42 ms" && Format.ping(0.0001) == "1 ms" && Format.ping(.nan) == "1 ms", "Ping in whole milliseconds")
 check(PingReading().text == "– ms" && PingReading(failed: true).text == "timeout", "Ping before a reply and after a failure")
+check(PingReading(latency: 0.05, offline: true).text == "offline" && PingReading(offline: true).quality == .poor, "Offline hides the last ping")
 check(PingReading(latency: 0.05).quality == .good && PingReading(latency: 0.2).quality == .fair
       && PingReading(latency: 0.5).quality == .poor && PingReading(failed: true).quality == .poor && PingReading().quality == nil,
       "Ping quality")
 let trace = Cloudflare.trace("fl=1\nh=speed.cloudflare.com\nip=104.28.200.67\ncolo=SOF\nloc=GE\nwarp=on\n")
 check(trace == NetworkLocation(ip: "104.28.200.67", country: "GE", colo: "SOF"), "Trace gives address, country, and data center")
 check(Cloudflare.trace("<html>blocked</html>") == nil, "A page without an address is not a trace")
-let meta = Cloudflare.meta(Data("""
-    {"clientIp":"104.28.200.67","asn":13335,"asOrganization":"Cloudflare, Inc.","country":"GE","city":"Tbilisi",
-     "colo":{"iata":"SOF","city":"Sofia","cca2":"BG"}}
-    """.utf8))
-check(meta == NetworkLocation(ip: "104.28.200.67", country: "GE", city: "Tbilisi", organization: "Cloudflare, Inc.",
-                              colo: "SOF", coloCity: "Sofia"), "Meta adds city, operator, and data center city")
-check(Cloudflare.meta(Data(#"{"clientIp":"1.2.3.4","country":"DE","city":"","colo":"FRA"}"#.utf8))
-      == NetworkLocation(ip: "1.2.3.4", country: "DE", colo: "FRA"), "Older meta with a plain colo code")
-check(Cloudflare.meta(Data("{}".utf8)) == nil, "Empty meta is ignored")
+let located = NetworkLocation(ip: "104.28.200.67", country: "GE", city: "Tbilisi", colo: "SOF")
 let english = Locale(identifier: "en_US")
-check(meta?.place(locale: english) == "Tbilisi, Georgia" && trace?.place(locale: english) == "Georgia", "Place names")
-check(meta?.flag == "🇬🇪" && NetworkLocation(ip: "", country: "XX", colo: "").flag == nil
+check(located.place(locale: english) == "Tbilisi, Georgia" && trace?.place(locale: english) == "Georgia", "Place names")
+check(located.flag == "🇬🇪" && NetworkLocation(ip: "", country: "XX", colo: "").flag == nil
       && NetworkLocation(ip: "", country: "T1", colo: "").flag == nil, "Flags only for real regions")
-if let meta {
-    let located = PingReading(latency: 0.291, location: meta)
-    check(MenuBar.pingColumns(located, stacked: true) == [["🇬🇪 GE", "291 ms"]], "Stacked: flag and country over the ping")
-    check(MenuBar.pingColumns(located, stacked: false) == [["🇬🇪 GE"], ["291 ms"]], "Side by side: location, then ping")
-}
+let reading = PingReading(latency: 0.291, location: located)
+check(MenuBar.pingColumns(reading, stacked: true) == [["🇬🇪 GE", "291 ms"]], "Stacked: flag and country over the ping")
+check(MenuBar.pingColumns(reading, stacked: false) == [["🇬🇪 GE"], ["291 ms"]], "Side by side: location, then ping")
 check(MenuBar.pingColumns(PingReading(failed: true), stacked: true) == [["timeout"]], "Only the ping until the location is known")
 check(MenuBar.pingColumns(PingReading(latency: 0.05, location: NetworkLocation(ip: "1.2.3.4", country: "T1", colo: "")), stacked: true)
       == [["T1", "50 ms"]], "A code without a flag is shown alone")
@@ -147,15 +138,27 @@ check(located(.ipsb, #"{"organization":"Cloudflare Warp","isp":"Cloudflare Warp"
 check(located(.ifconfig, #"{"ip":"104.28.200.67","country":"Georgia","country_iso":"GE","city":"Tbilisi","asn":"AS13335","asn_org":"CLOUDFLARENET"}"#)
       == NetworkLocation(ip: "104.28.200.67", country: "GE", city: "Tbilisi", organization: "CLOUDFLARENET", colo: ""), "ifconfig.co")
 check(located(.cloudflare, "ip=1.2.3.4\nloc=DE\ncolo=FRA\n") == NetworkLocation(ip: "1.2.3.4", country: "DE", colo: "FRA"),
-      "Cloudflare falls back to the trace")
+      "Cloudflare reads the trace")
 check(located(.ipinfo, #"{"error":"rate limited"}"#) == nil && located(.geojs, "<html>") == nil && located(.off, "{}") == nil,
       "Errors and pages are not locations")
 check(LocationService.withoutASN("AS13335 Cloudflare, Inc.") == "Cloudflare, Inc." && LocationService.withoutASN("ASUS Net") == "ASUS Net",
       "Only a real AS number is dropped")
-check(LocationService.off.requests.isEmpty && LocationService.cloudflare.requests.count == 2
+check(LocationService.allCases.allSatisfy { $0.requests.allSatisfy { $0.allHTTPHeaderFields?.isEmpty ?? true } },
+      "Lookups send no made-up headers")
+check(LocationService.off.requests.isEmpty && LocationService.cloudflare.requests.count == 1
       && LocationService.allCases.allSatisfy { $0.requests.allSatisfy { $0.url?.scheme == "https" } }, "Lookups use HTTPS only")
 check(PingServer.allCases.allSatisfy { $0.url.scheme == "https" } && PingServer.cloudflare.reportsAddress && !PingServer.google.reportsAddress,
       "Ping servers")
+
+// Replies are cleaned before they are shown
+check(Cloudflare.trace("ip=<script>\nloc=DE\n") == nil && Cloudflare.trace("ip=1.2.3.4.5.6.7.8.9.0.1.2.3.4.5.6.7.8.9.0.1.2.3.4.5.6.7\n") == nil,
+      "An address must look like one")
+check(Cloudflare.trace("ip=::1\nloc=Germany\ncolo=FRANKFURT\n") == NetworkLocation(ip: "::1", country: "", colo: ""),
+      "Country and data center codes must have their usual shape")
+check(Cloudflare.trace("ip=1.2.3.4\nloc=de\ncolo=fra\n") == NetworkLocation(ip: "1.2.3.4", country: "DE", colo: "FRA"), "Codes are uppercased")
+let noisy = located(.ipinfo, #"{"ip":"1.2.3.4","country":"GE","city":"Tbi\u202Elisi\nX","org":"AS1 \#(String(repeating: "x", count: 500))"}"#)
+check(noisy?.city == "TbilisiX" && (noisy?.organization?.count ?? 99) <= 60, "Text loses control characters and is capped")
+check(NetworkLocation.text(" \n ") == nil && NetworkLocation.text("Sofia") == "Sofia", "Blank text is nothing")
 
 // Combining traced and looked-up locations
 let v4 = NetworkLocation(ip: "104.28.200.67", country: "GE", colo: "SOF")

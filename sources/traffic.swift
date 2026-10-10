@@ -196,7 +196,29 @@ struct NetworkLocation: Equatable {
     var organization: String?
     /// Cloudflare data center that answered, as an IATA airport code ("FRA").
     var colo: String
-    var coloCity: String?
+    /// Builds a location from what a server sent, or nil without a valid address. Text loses control and direction
+    /// characters and is capped, and codes must have their usual shape, so a bad reply cannot garble the menu bar or popover.
+    static func parsed(ip: String?, country: String?, city: String? = nil, organization: String? = nil,
+                       colo: String? = nil) -> NetworkLocation? {
+        let digits = CharacterSet(charactersIn: "0123456789abcdefABCDEF.:")
+        guard let ip = ip?.trimmingCharacters(in: .whitespaces), (2...45).contains(ip.unicodeScalars.count),
+              ip.unicodeScalars.allSatisfy(digits.contains) else { return nil }
+        func code(_ value: String?, length: Int, allowing allowed: CharacterSet) -> String {
+            let code = (value ?? "").trimmingCharacters(in: .whitespaces).uppercased()
+            return code.unicodeScalars.count == length && code.unicodeScalars.allSatisfy(allowed.contains) ? code : ""
+        }
+        let letters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        // Two characters, as in "DE"; Cloudflare also sends "T1" for Tor.
+        return NetworkLocation(ip: ip, country: code(country, length: 2, allowing: letters.union(CharacterSet(charactersIn: "0123456789"))),
+                               city: text(city), organization: text(organization), colo: code(colo, length: 3, allowing: letters))
+    }
+    /// Printable text of at most `limit` characters, or nil if nothing is left.
+    static func text(_ value: String?, limit: Int = 60) -> String? {
+        guard let value else { return nil }
+        let printable = String(String.UnicodeScalarView(value.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return printable.isEmpty ? nil : String(printable.prefix(limit))
+    }
     /// The flag emoji for `country`, if it is a real region code. Cloudflare uses "XX" for unknown and "T1" for Tor.
     var flag: String? {
         let code = country.uppercased()
@@ -219,19 +241,7 @@ enum Cloudflare {
             guard let equals = line.firstIndex(of: "=") else { continue }
             fields[String(line[..<equals])] = String(line[line.index(after: equals)...])
         }
-        guard let ip = fields["ip"], !ip.isEmpty else { return nil }
-        return NetworkLocation(ip: ip, country: fields["loc"] ?? "", colo: fields["colo"] ?? "")
-    }
-    /// The JSON from speed.cloudflare.com/meta, which adds the city and network operator.
-    static func meta(_ data: Data) -> NetworkLocation? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let ip = json["clientIp"] as? String, !ip.isEmpty else { return nil }
-        func text(_ value: Any?) -> String? { (value as? String).flatMap { $0.isEmpty ? nil : $0 } }
-        // "colo" is an object with the data center's details; older responses gave just the code.
-        let colo = json["colo"] as? [String: Any]
-        return NetworkLocation(ip: ip, country: text(json["country"]) ?? "", city: text(json["city"]),
-                               organization: text(json["asOrganization"]),
-                               colo: text(colo?["iata"]) ?? text(json["colo"]) ?? "", coloCity: text(colo?["city"]))
+        return NetworkLocation.parsed(ip: fields["ip"], country: fields["loc"], colo: fields["colo"])
     }
 }
 
@@ -265,7 +275,7 @@ enum LocationService: String, CaseIterable, Identifiable {
     static let interval: TimeInterval = 60
     var title: String {
         switch self {
-        case .cloudflare: "Cloudflare"
+        case .cloudflare: "Cloudflare (country only)"
         case .ipinfo: "ipinfo.io"
         case .geojs: "GeoJS"
         case .ipsb: "IP.SB"
@@ -276,11 +286,8 @@ enum LocationService: String, CaseIterable, Identifiable {
     /// Tried in order until one answers.
     var requests: [URLRequest] {
         switch self {
-        case .cloudflare:
-            var meta = URLRequest(url: URL(string: "https://speed.cloudflare.com/meta")!)
-            // The endpoint answers only requests that come from Cloudflare's speed test page. The trace is the fallback.
-            meta.setValue("https://speed.cloudflare.com/", forHTTPHeaderField: "Referer")
-            return [meta, URLRequest(url: PingServer.cloudflare.url)]
+        // Cloudflare's public trace gives the address and country, but no city or network operator.
+        case .cloudflare: return [URLRequest(url: PingServer.cloudflare.url)]
         case .ipinfo: return [URLRequest(url: URL(string: "https://ipinfo.io/json")!)]
         case .geojs: return [URLRequest(url: URL(string: "https://get.geojs.io/v1/ip/geo.json")!)]
         case .ipsb: return [URLRequest(url: URL(string: "https://api.ip.sb/geoip")!)]
@@ -290,11 +297,9 @@ enum LocationService: String, CaseIterable, Identifiable {
     }
     var host: String? { requests.first?.url?.host }
     func location(from data: Data) -> NetworkLocation? {
-        if self == .cloudflare { return Cloudflare.meta(data) ?? Cloudflare.trace(String(decoding: data, as: UTF8.self)) }
+        if self == .cloudflare { return Cloudflare.trace(String(decoding: data, as: UTF8.self)) }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        func text(_ key: String) -> String? {
-            (json[key] as? String).flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
-        }
+        func text(_ key: String) -> String? { NetworkLocation.text(json[key] as? String) }
         let country: String, operators: [String]
         switch self {
         case .ipinfo: (country, operators) = ("country", ["org"])
@@ -303,9 +308,8 @@ enum LocationService: String, CaseIterable, Identifiable {
         case .ifconfig: (country, operators) = ("country_iso", ["asn_org"])
         case .cloudflare, .off: return nil
         }
-        guard let ip = text("ip") else { return nil }
-        return NetworkLocation(ip: ip, country: text(country) ?? "", city: text("city"),
-                               organization: operators.lazy.compactMap(text).first.map(Self.withoutASN), colo: "")
+        return NetworkLocation.parsed(ip: text("ip"), country: text(country), city: text("city"),
+                                      organization: operators.lazy.compactMap(text).first.map(Self.withoutASN))
     }
     /// "AS13335 Cloudflare, Inc." → "Cloudflare, Inc."
     static func withoutASN(_ name: String) -> String {
@@ -349,7 +353,7 @@ struct LocationState: Equatable {
         guard let traced else { return details }
         guard detailsFor == traced.ip else { return traced }
         var merged = details
-        if merged.colo != traced.colo { merged.colo = traced.colo; merged.coloCity = nil }
+        merged.colo = traced.colo
         return merged
     }
 }
@@ -360,11 +364,13 @@ struct PingReading: Equatable {
     /// Seconds for the last round trip, or nil if it failed or none has finished yet.
     var latency: TimeInterval?
     var failed = false
+    /// No network connection at all, so no ping is sent.
+    var offline = false
     var location: NetworkLocation?
     var history = PingHistory()
-    var text: String { latency.map(Format.ping) ?? (failed ? "timeout" : "– ms") }
+    var text: String { offline ? "offline" : latency.map(Format.ping) ?? (failed ? "timeout" : "– ms") }
     var quality: Quality? {
-        guard let latency else { return failed ? .poor : nil }
+        guard let latency else { return failed || offline ? .poor : nil }
         return latency < 0.15 ? .good : latency < 0.4 ? .fair : .poor
     }
 }
